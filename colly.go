@@ -25,10 +25,7 @@ type Collector struct {
 	// Leave it blank to allow any domains to be visited
 	AllowedDomains []string
 	// AllowURLRevisit allows multiple downloads of the same URL
-	AllowURLRevisit bool
-	// MaxBodySize limits the retrieved response body. `0` means unlimited.
-	// The default value for MaxBodySize is 10240 (10MB)
-	MaxBodySize       int
+	AllowURLRevisit   bool
 	visitedURLs       []string
 	htmlCallbacks     map[string]HTMLCallback
 	requestCallbacks  []RequestCallback
@@ -119,7 +116,6 @@ func (c *Collector) Init() {
 	c.htmlCallbacks = make(map[string]HTMLCallback, 0)
 	c.requestCallbacks = make([]RequestCallback, 0, 8)
 	c.responseCallbacks = make([]ResponseCallback, 0, 8)
-	c.MaxBodySize = 10240
 	c.backend = &httpBackend{}
 	c.backend.Init()
 	c.wg = &sync.WaitGroup{}
@@ -212,7 +208,7 @@ func (c *Collector) scrape(u, method string, depth int, requestData map[string]s
 	if len(c.requestCallbacks) > 0 {
 		c.handleOnRequest(request)
 	}
-	response, err := c.backend.Do(req, c.MaxBodySize)
+	response, err := c.backend.Do(req)
 	// TODO add OnError callback to handle these cases
 	if err != nil {
 		return err
