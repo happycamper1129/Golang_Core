@@ -27,8 +27,9 @@ type Collector struct {
 	AllowedDomains []string
 	// AllowURLRevisit allows multiple downloads of the same URL
 	AllowURLRevisit bool
-	// MaxBodySize limits the retrieved response body. `0` means unlimited.
-	// The default value for MaxBodySize is 10240 (10MB)
+	// MaxBodySize is the limit of the retrieved response body in bytes.
+	// `0` means unlimited.
+	// The default value for MaxBodySize is 10MB (10 * 1024 * 1024 bytes).
 	MaxBodySize       int
 	visitedURLs       []string
 	htmlCallbacks     map[string]HTMLCallback
@@ -120,7 +121,7 @@ func (c *Collector) Init() {
 	c.htmlCallbacks = make(map[string]HTMLCallback, 0)
 	c.requestCallbacks = make([]RequestCallback, 0, 8)
 	c.responseCallbacks = make([]ResponseCallback, 0, 8)
-	c.MaxBodySize = 10240
+	c.MaxBodySize = 10 * 1024 * 1024
 	c.backend = &httpBackend{}
 	c.backend.Init()
 	c.wg = &sync.WaitGroup{}
@@ -189,7 +190,7 @@ func (c *Collector) scrape(u, method string, depth int, requestData map[string]s
 	}
 	var form url.Values
 	if method == "POST" {
-		form := url.Values{}
+		form = url.Values{}
 		for k, v := range requestData {
 			form.Add(k, v)
 		}
@@ -357,7 +358,7 @@ func (r *Request) Visit(URL string) error {
 // Post continues a collector job by creating a POST request.
 // Post also calls the previously provided OnRequest, OnResponse, OnHTML callbacks
 func (r *Request) Post(URL string, requestData map[string]string) error {
-	return r.collector.scrape(r.AbsoluteURL(URL), "GET", r.Depth+1, requestData)
+	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, requestData)
 }
 
 // Put stores a value in Context
