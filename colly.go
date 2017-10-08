@@ -30,7 +30,10 @@ type Collector struct {
 	// MaxBodySize is the limit of the retrieved response body in bytes.
 	// `0` means unlimited.
 	// The default value for MaxBodySize is 10MB (10 * 1024 * 1024 bytes).
-	MaxBodySize       int
+	MaxBodySize int
+	// CacheDir specifies a location where GET requests are cached as files.
+	// When it's not defined, caching is disabled.
+	CacheDir          string
 	visitedURLs       []string
 	htmlCallbacks     map[string]HTMLCallback
 	requestCallbacks  []RequestCallback
@@ -84,7 +87,7 @@ type HTMLElement struct {
 
 // Context provides a tiny layer for passing data between callbacks
 type Context struct {
-	contextMap map[string]string
+	ContextMap map[string]string
 	lock       *sync.Mutex
 }
 
@@ -107,7 +110,7 @@ func NewCollector() *Collector {
 // NewContext initializes a new Context instance
 func NewContext() *Context {
 	return &Context{
-		contextMap: make(map[string]string),
+		ContextMap: make(map[string]string),
 		lock:       &sync.Mutex{},
 	}
 }
@@ -133,7 +136,7 @@ func (c *Collector) Init() {
 // Visit also calls the previously provided OnRequest,
 // OnResponse, OnHTML callbacks
 func (c *Collector) Visit(URL string) error {
-	return c.scrape(URL, "GET", 1, nil, nil)
+	return c.scrape(URL, "GET", 1, nil)
 }
 
 // Post starts collecting job by creating a POST
@@ -141,10 +144,10 @@ func (c *Collector) Visit(URL string) error {
 // Post also calls the previously provided OnRequest,
 // OnResponse, OnHTML callbacks
 func (c *Collector) Post(URL string, requestData map[string]string) error {
-	return c.scrape(URL, "POST", 1, requestData, nil)
+	return c.scrape(URL, "POST", 1, requestData)
 }
 
-func (c *Collector) scrape(u, method string, depth int, requestData map[string]string, ctx *Context) error {
+func (c *Collector) scrape(u, method string, depth int, requestData map[string]string) error {
 	c.wg.Add(1)
 	defer c.wg.Done()
 	if u == "" {
@@ -203,9 +206,7 @@ func (c *Collector) scrape(u, method string, depth int, requestData map[string]s
 	if method == "POST" {
 		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 	}
-	if ctx == nil {
-		ctx = NewContext()
-	}
+	ctx := NewContext()
 	request := &Request{
 		URL:       parsedURL,
 		Headers:   &req.Header,
@@ -216,18 +217,18 @@ func (c *Collector) scrape(u, method string, depth int, requestData map[string]s
 	if len(c.requestCallbacks) > 0 {
 		c.handleOnRequest(request)
 	}
-	response, err := c.backend.Do(req, c.MaxBodySize)
+	response, err := c.backend.Cache(req, c.MaxBodySize, c.CacheDir)
 	// TODO add OnError callback to handle these cases
 	if err != nil {
 		return err
 	}
 	response.Ctx = ctx
 	response.Request = request
-	if len(c.responseCallbacks) > 0 {
-		c.handleOnResponse(response)
-	}
 	if strings.Index(strings.ToLower(response.Headers.Get("Content-Type")), "html") > -1 {
 		c.handleOnHTML(response.Body, request, response)
+	}
+	if len(c.responseCallbacks) > 0 {
+		c.handleOnResponse(response)
 	}
 	return nil
 }
@@ -350,31 +351,30 @@ func (r *Request) AbsoluteURL(u string) string {
 }
 
 // Visit continues Collector's collecting job by creating a
-// request and preserves the Context of the previous request.
+// request to the URL specified in parameter.
 // Visit also calls the previously provided OnRequest,
 // OnResponse, OnHTML callbacks
 func (r *Request) Visit(URL string) error {
-	return r.collector.scrape(r.AbsoluteURL(URL), "GET", r.Depth+1, nil, r.Ctx)
+	return r.collector.scrape(r.AbsoluteURL(URL), "GET", r.Depth+1, nil)
 }
 
-// Post continues a collector job by creating a POST request and preserves the Context
-// of the previous request.
+// Post continues a collector job by creating a POST request.
 // Post also calls the previously provided OnRequest, OnResponse, OnHTML callbacks
 func (r *Request) Post(URL string, requestData map[string]string) error {
-	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, requestData, r.Ctx)
+	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, requestData)
 }
 
 // Put stores a value in Context
 func (c *Context) Put(key, value string) {
 	c.lock.Lock()
-	c.contextMap[key] = value
+	c.ContextMap[key] = value
 	c.lock.Unlock()
 }
 
 // Get retrieves a value from Context. If no value found for `k`
 // Get returns an empty string if key not found
 func (c *Context) Get(key string) string {
-	if v, ok := c.contextMap[key]; ok {
+	if v, ok := c.ContextMap[key]; ok {
 		return v
 	}
 	return ""
