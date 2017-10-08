@@ -136,7 +136,7 @@ func (c *Collector) Init() {
 // Visit also calls the previously provided OnRequest,
 // OnResponse, OnHTML callbacks
 func (c *Collector) Visit(URL string) error {
-	return c.scrape(URL, "GET", 1, nil)
+	return c.scrape(URL, "GET", 1, nil, nil)
 }
 
 // Post starts collecting job by creating a POST
@@ -144,10 +144,10 @@ func (c *Collector) Visit(URL string) error {
 // Post also calls the previously provided OnRequest,
 // OnResponse, OnHTML callbacks
 func (c *Collector) Post(URL string, requestData map[string]string) error {
-	return c.scrape(URL, "POST", 1, requestData)
+	return c.scrape(URL, "POST", 1, requestData, nil)
 }
 
-func (c *Collector) scrape(u, method string, depth int, requestData map[string]string) error {
+func (c *Collector) scrape(u, method string, depth int, requestData map[string]string, ctx *Context) error {
 	c.wg.Add(1)
 	defer c.wg.Done()
 	if u == "" {
@@ -206,7 +206,9 @@ func (c *Collector) scrape(u, method string, depth int, requestData map[string]s
 	if method == "POST" {
 		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 	}
-	ctx := NewContext()
+	if ctx == nil {
+		ctx = NewContext()
+	}
 	request := &Request{
 		URL:       parsedURL,
 		Headers:   &req.Header,
@@ -224,11 +226,11 @@ func (c *Collector) scrape(u, method string, depth int, requestData map[string]s
 	}
 	response.Ctx = ctx
 	response.Request = request
-	if strings.Index(strings.ToLower(response.Headers.Get("Content-Type")), "html") > -1 {
-		c.handleOnHTML(response.Body, request, response)
-	}
 	if len(c.responseCallbacks) > 0 {
 		c.handleOnResponse(response)
+	}
+	if strings.Index(strings.ToLower(response.Headers.Get("Content-Type")), "html") > -1 {
+		c.handleOnHTML(response.Body, request, response)
 	}
 	return nil
 }
@@ -351,17 +353,18 @@ func (r *Request) AbsoluteURL(u string) string {
 }
 
 // Visit continues Collector's collecting job by creating a
-// request to the URL specified in parameter.
+// request and preserves the Context of the previous request.
 // Visit also calls the previously provided OnRequest,
 // OnResponse, OnHTML callbacks
 func (r *Request) Visit(URL string) error {
-	return r.collector.scrape(r.AbsoluteURL(URL), "GET", r.Depth+1, nil)
+	return r.collector.scrape(r.AbsoluteURL(URL), "GET", r.Depth+1, nil, r.Ctx)
 }
 
-// Post continues a collector job by creating a POST request.
+// Post continues a collector job by creating a POST request and preserves the Context
+// of the previous request.
 // Post also calls the previously provided OnRequest, OnResponse, OnHTML callbacks
 func (r *Request) Post(URL string, requestData map[string]string) error {
-	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, requestData)
+	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, requestData, r.Ctx)
 }
 
 func (c *Context) UnmarshalBinary(data []byte) error {
