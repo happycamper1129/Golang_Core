@@ -3,7 +3,9 @@ package colly
 
 import (
 	"bytes"
+	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -139,43 +141,90 @@ func (c *Collector) Init() {
 // Visit also calls the previously provided OnRequest,
 // OnResponse, OnHTML callbacks
 func (c *Collector) Visit(URL string) error {
-	return c.scrape(URL, "GET", 1, nil, nil)
+	return c.scrape(URL, "GET", 1, nil, nil, nil)
 }
 
 // Post starts a collector job by creating a POST request.
 // Post also calls the previously provided OnRequest,
 // OnResponse, OnHTML callbacks
 func (c *Collector) Post(URL string, requestData map[string]string) error {
-	return c.scrape(URL, "POST", 1, createFormReader(requestData), nil)
+	return c.scrape(URL, "POST", 1, createFormReader(requestData), nil, nil)
 }
 
 // PostRaw starts a collector job by creating a POST request with raw binary data.
 // Post also calls the previously provided callbacks
 func (c *Collector) PostRaw(URL string, requestData []byte) error {
-	return c.scrape(URL, "POST", 1, bytes.NewReader(requestData), nil)
+	return c.scrape(URL, "POST", 1, bytes.NewReader(requestData), nil, nil)
 }
 
-func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, ctx *Context) error {
+// PostMultipartRaw starts a collector job by creating a Multipart POST request
+// with raw binary data.  PostMultipartRaw also calls the previously provided callbacks
+func (c *Collector) PostMultipartRaw(URL string, requestData map[string][]byte) error {
+	boundary := randomBoundary()
+	hdr := http.Header{}
+	hdr.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	hdr.Set("User-Agent", c.UserAgent)
+	return c.scrape(URL, "POST", 1, createMultipartReader(boundary, requestData), nil, hdr)
+}
+
+func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header) error {
 	c.wg.Add(1)
 	defer c.wg.Done()
-	if err := c.requestCheck(u, depth); err != nil {
-		return err
+	if u == "" {
+		return errors.New("Missing URL")
+	}
+	if c.MaxDepth > 0 && c.MaxDepth < depth {
+		return errors.New("Max depth limit reached")
+	}
+	if !c.AllowURLRevisit {
+		visited := false
+		for _, u2 := range c.visitedURLs {
+			if u2 == u {
+				visited = true
+				break
+			}
+		}
+		if visited {
+			return errors.New("URL already visited")
+		}
 	}
 	parsedURL, err := url.Parse(u)
 	if err != nil {
 		return err
 	}
-	if parsedURL.Scheme == "" {
-		parsedURL.Scheme = "http"
+	allowed := false
+	if c.AllowedDomains == nil || len(c.AllowedDomains) == 0 {
+		allowed = true
+	} else {
+		for _, d := range c.AllowedDomains {
+			if d == parsedURL.Host {
+				allowed = true
+				break
+			}
+		}
 	}
-	if !c.isDomainAllowed(parsedURL.Host) {
+	if !allowed {
 		return errors.New("Forbidden domain")
 	}
-	req, err := http.NewRequest(method, parsedURL.String(), requestData)
+	if !c.AllowURLRevisit {
+		c.lock.Lock()
+		c.visitedURLs = append(c.visitedURLs, u)
+		c.lock.Unlock()
+	}
+	req, err := http.NewRequest(method, u, requestData)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", c.UserAgent)
+
+	if hdr == nil {
+		req.Header.Set("User-Agent", c.UserAgent)
+		if method == "POST" {
+			req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+		}
+	} else {
+		req.Header = hdr
+	}
+
 	if ctx == nil {
 		ctx = NewContext()
 	}
@@ -186,11 +235,8 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 		Depth:     depth,
 		collector: c,
 	}
-
-	c.handleOnRequest(request)
-
-	if method == "POST" && req.Header.Get("Content-Type") == "" {
-		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	if len(c.requestCallbacks) > 0 {
+		c.handleOnRequest(request)
 	}
 	response, err := c.backend.Cache(req, c.MaxBodySize, c.CacheDir)
 	// TODO add OnError callback to handle these cases
@@ -200,44 +246,13 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 	response.Ctx = ctx
 	response.Request = request
 	response.fixCharset()
-
-	c.handleOnResponse(response)
-
-	c.handleOnHTML(request, response)
-
-	return nil
-}
-
-func (c *Collector) requestCheck(u string, depth int) error {
-	if u == "" {
-		return errors.New("Missing URL")
+	if len(c.responseCallbacks) > 0 {
+		c.handleOnResponse(response)
 	}
-	if c.MaxDepth > 0 && c.MaxDepth < depth {
-		return errors.New("Max depth limit reached")
-	}
-	if !c.AllowURLRevisit {
-		for _, u2 := range c.visitedURLs {
-			if u2 == u {
-				return errors.New("URL already visited")
-			}
-		}
-		c.lock.Lock()
-		c.visitedURLs = append(c.visitedURLs, u)
-		c.lock.Unlock()
+	if strings.Index(strings.ToLower(response.Headers.Get("Content-Type")), "html") > -1 {
+		c.handleOnHTML(request, response)
 	}
 	return nil
-}
-
-func (c *Collector) isDomainAllowed(domain string) bool {
-	if c.AllowedDomains == nil || len(c.AllowedDomains) == 0 {
-		return true
-	}
-	for _, d2 := range c.AllowedDomains {
-		if d2 == domain {
-			return true
-		}
-	}
-	return false
 }
 
 // Wait returns when the collector jobs are finished
@@ -269,13 +284,6 @@ func (c *Collector) OnHTML(goquerySelector string, f HTMLCallback) {
 	c.lock.Unlock()
 }
 
-// OnHTMLDetach deregister a function. Function will not be execute after detached
-func (c *Collector) OnHTMLDetach(goquerySelector string) {
-	c.lock.Lock()
-	delete(c.htmlCallbacks, goquerySelector)
-	c.lock.Unlock()
-}
-
 // WithTransport allows you to set a custom http.Transport for this collector.
 func (c *Collector) WithTransport(transport *http.Transport) {
 	c.backend.Client.Transport = transport
@@ -304,9 +312,6 @@ func (c *Collector) handleOnResponse(r *Response) {
 }
 
 func (c *Collector) handleOnHTML(req *Request, resp *Response) {
-	if strings.Index(strings.ToLower(resp.Headers.Get("Content-Type")), "html") == -1 {
-		return
-	}
 	doc, err := goquery.NewDocumentFromReader(bytes.NewBuffer(resp.Body))
 	if err != nil {
 		return
@@ -397,21 +402,32 @@ func (r *Request) AbsoluteURL(u string) string {
 // Visit also calls the previously provided OnRequest,
 // OnResponse, OnHTML callbacks
 func (r *Request) Visit(URL string) error {
-	return r.collector.scrape(r.AbsoluteURL(URL), "GET", r.Depth+1, nil, r.Ctx)
+	return r.collector.scrape(r.AbsoluteURL(URL), "GET", r.Depth+1, nil, r.Ctx, nil)
 }
 
 // Post continues a collector job by creating a POST request and preserves the Context
 // of the previous request.
 // Post also calls the previously provided OnRequest, OnResponse, OnHTML callbacks
 func (r *Request) Post(URL string, requestData map[string]string) error {
-	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, createFormReader(requestData), r.Ctx)
+	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, createFormReader(requestData), r.Ctx, nil)
 }
 
 // PostRaw starts a collector job by creating a POST request with raw binary data.
 // PostRaw preserves the Context of the previous request
 // and calls the previously provided callbacks
 func (r *Request) PostRaw(URL string, requestData []byte) error {
-	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, bytes.NewReader(requestData), r.Ctx)
+	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, bytes.NewReader(requestData), r.Ctx, nil)
+}
+
+// PostMultipartRaw starts a collector job by creating a Multipart POST request
+// with raw binary data.  PostMultipartRaw also calls the previously provided.
+// callbacks
+func (r *Request) PostMultipartRaw(URL string, requestData map[string][]byte) error {
+	boundary := randomBoundary()
+	hdr := http.Header{}
+	hdr.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	hdr.Set("User-Agent", r.collector.UserAgent)
+	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, createMultipartReader(boundary, requestData), r.Ctx, hdr)
 }
 
 // UnmarshalBinary decodes Context value to nil
@@ -438,7 +454,6 @@ func (c *Context) Put(key, value string) {
 func (c *Context) Get(key string) string {
 	c.lock.RLock()
 	if v, ok := c.contextMap[key]; ok {
-		c.lock.RUnlock()
 		return v
 	}
 	c.lock.RUnlock()
@@ -451,6 +466,35 @@ func createFormReader(data map[string]string) io.Reader {
 		form.Add(k, v)
 	}
 	return strings.NewReader(form.Encode())
+}
+
+func createMultipartReader(boundary string, data map[string][]byte) io.Reader {
+	dashBoundary := "--" + boundary
+
+	body := []byte{}
+	buffer := bytes.NewBuffer(body)
+
+	buffer.WriteString("Content-type: multipart/form-data; boundary=" + boundary + "\n\n")
+	for contentType, content := range data {
+		buffer.WriteString(dashBoundary + "\n")
+		buffer.WriteString("Content-Disposition: form-data; name=" + contentType + "\n")
+		buffer.WriteString(fmt.Sprintf("Content-Length: %d \n\n", len(content)))
+		buffer.Write(content)
+		buffer.WriteString("\n")
+	}
+	buffer.WriteString(dashBoundary + "--\n\n")
+	return buffer
+}
+
+// randomBoundary was borrowed from
+// github.com/golang/go/mime/multipart/writer.go#randomBoundary
+func randomBoundary() string {
+	var buf [30]byte
+	_, err := io.ReadFull(rand.Reader, buf[:])
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf("%x", buf[:])
 }
 
 func (r *Response) fixCharset() {
