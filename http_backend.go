@@ -96,12 +96,12 @@ func (r *LimitRule) Match(domain string) bool {
 
 func (h *httpBackend) GetMatchingRule(domain string) *LimitRule {
 	h.lock.RLock()
-	defer h.lock.RUnlock()
 	for _, r := range h.LimitRules {
 		if r.Match(domain) {
 			return r
 		}
 	}
+	h.lock.RUnlock()
 	return nil
 }
 
@@ -117,12 +117,10 @@ func (h *httpBackend) Cache(request *http.Request, bodySize int, cacheDir string
 		resp := new(Response)
 		err := gob.NewDecoder(file).Decode(resp)
 		file.Close()
-		if resp.StatusCode < 500 {
-			return resp, err
-		}
+		return resp, err
 	}
 	resp, err := h.Do(request, bodySize)
-	if err != nil || resp.StatusCode >= 500 {
+	if err != nil {
 		return resp, err
 	}
 	if _, err := os.Stat(dir); err != nil {
