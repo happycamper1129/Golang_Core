@@ -19,6 +19,7 @@ import (
 	"golang.org/x/net/html/charset"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/temoto/robotstxt"
 )
 
 // Collector provides the scraper instance for a scraping job
@@ -41,13 +42,18 @@ type Collector struct {
 	// AllowURLRevisit allows multiple downloads of the same URL
 	AllowURLRevisit bool
 	// MaxBodySize is the limit of the retrieved response body in bytes.
-	// 0 means unlimited.
+	// `0` means unlimited.
 	// The default value for MaxBodySize is 10MB (10 * 1024 * 1024 bytes).
 	MaxBodySize int
 	// CacheDir specifies a location where GET requests are cached as files.
 	// When it's not defined, caching is disabled.
-	CacheDir          string
+	CacheDir string
+	// IgnoreRobotsTxt allows the Collector to ignore any restrictions set by
+	// the target host's robots.txt file.  See http://www.robotstxt.org/ for more
+	// information.
+	IgnoreRobotsTxt   bool
 	visitedURLs       []string
+	robotsMap         map[string]*robotstxt.RobotsData
 	htmlCallbacks     map[string]HTMLCallback
 	requestCallbacks  []RequestCallback
 	responseCallbacks []ResponseCallback
@@ -148,6 +154,7 @@ func (c *Collector) Init() {
 	c.backend.Client.CheckRedirect = c.checkRedirectFunc()
 	c.wg = &sync.WaitGroup{}
 	c.lock = &sync.Mutex{}
+	c.robotsMap = make(map[string]*robotstxt.RobotsData, 0)
 }
 
 // Visit starts Collector's collecting job by creating a
@@ -194,6 +201,11 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 	}
 	if !c.isDomainAllowed(parsedURL.Host) {
 		return errors.New("Forbidden domain")
+	}
+	if !c.IgnoreRobotsTxt {
+		if err = c.checkRobots(parsedURL); err != nil {
+			return err
+		}
 	}
 	req, err := http.NewRequest(method, parsedURL.String(), requestData)
 	if err != nil {
@@ -287,6 +299,32 @@ func (c *Collector) isDomainAllowed(domain string) bool {
 	return false
 }
 
+func (c *Collector) checkRobots(u *url.URL) error {
+	var robot *robotstxt.RobotsData
+	var ok bool
+	var err error
+
+	if robot, ok = c.robotsMap[u.Hostname()]; !ok {
+		// no robots file cached
+		resp, _ := c.backend.Client.Get(u.Scheme + "://" + u.Hostname() + "/robots.txt")
+		robot, err = robotstxt.FromResponse(resp)
+		if err != nil {
+			return err
+		}
+		c.robotsMap[u.Hostname()] = robot
+	}
+
+	uaGroup := robot.FindGroup(c.UserAgent)
+	if uaGroup == nil {
+		return nil
+	}
+
+	if !uaGroup.Test(u.EscapedPath()) {
+		return errors.New("URL blocked by robots.txt")
+	}
+	return nil
+}
+
 // Wait returns when the collector jobs are finished
 func (c *Collector) Wait() {
 	c.wg.Wait()
@@ -308,8 +346,8 @@ func (c *Collector) OnResponse(f ResponseCallback) {
 }
 
 // OnHTML registers a function. Function will be executed on every HTML
-// element matched by the GoQuery Selector parameter.
-// GoQuery Selector is a selector used by https://github.com/PuerkitoBio/goquery
+// element matched by the `goquerySelector` parameter.
+// `goquerySelector` is a selector used by https://github.com/PuerkitoBio/goquery
 func (c *Collector) OnHTML(goquerySelector string, f HTMLCallback) {
 	c.lock.Lock()
 	c.htmlCallbacks[goquerySelector] = f
@@ -346,8 +384,8 @@ func (c *Collector) SetRequestTimeout(timeout time.Duration) {
 	c.backend.Client.Timeout = timeout
 }
 
-// SetProxy sets a proxy for the collector. This overrides the previously
-// used http.Transport if the type of the transport is not http.RoundTripper
+// SetProxy sets a proxy for the collector. This overrides the default RoundTripper
+// transport if no custom transport is set
 func (c *Collector) SetProxy(proxyURL string) error {
 	proxyParsed, err := url.Parse(proxyURL)
 	if err != nil {
@@ -425,12 +463,12 @@ func (c *Collector) handleOnError(response *Response, err error, request *Reques
 	return err
 }
 
-// Limit adds a new LimitRule to the collector
+// Limit adds a new `LimitRule` to the collector
 func (c *Collector) Limit(rule *LimitRule) error {
 	return c.backend.Limit(rule)
 }
 
-// Limits adds new LimitRules to the collector
+// Limits adds new `LimitRule`s to the collector
 func (c *Collector) Limits(rules []*LimitRule) error {
 	return c.backend.Limits(rules)
 }
@@ -498,12 +536,6 @@ func (h *HTMLElement) Attr(k string) string {
 		}
 	}
 	return ""
-}
-
-// ChildText returns the concatenated and stripped text content of the matching
-// elements.
-func (h *HTMLElement) ChildText(goquerySelector string) string {
-	return strings.TrimSpace(h.DOM.Find(goquerySelector).Text())
 }
 
 // AbsoluteURL returns with the resolved absolute URL of an URL chunk.
@@ -575,7 +607,7 @@ func (c *Context) Put(key, value string) {
 	c.lock.Unlock()
 }
 
-// Get retrieves a value from Context.
+// Get retrieves a value from Context. If no value found for `k`
 // Get returns an empty string if key not found
 func (c *Context) Get(key string) string {
 	c.lock.RLock()

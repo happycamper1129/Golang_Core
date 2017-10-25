@@ -32,13 +32,9 @@ func main() {
 
 	// Visit only domains: coursera.org, www.coursera.org
 	c.AllowedDomains = []string{"coursera.org", "www.coursera.org"}
+	c.CacheDir = "./t"
 	detailCollector.AllowedDomains = c.AllowedDomains
-
-	// Cache responses to prevent multiple download of pages
-	// even if the collector is restarted
-	c.CacheDir = "./coursera_cache"
 	detailCollector.CacheDir = c.CacheDir
-
 	courses := make([]Course, 0, 200)
 
 	// On every a element which has href attribute call callback
@@ -64,7 +60,8 @@ func main() {
 
 	// On every a HTML element which has name attribute call callback
 	c.OnHTML(`a[name]`, func(e *colly.HTMLElement) {
-		// Activate detailCollector if the link contains "coursera.org/learn"
+		// Add to courses map where key is the absolute URL and the
+		// values is the name of the course
 		courseURL := e.Request.AbsoluteURL(e.Attr("href"))
 		if strings.Index(courseURL, "coursera.org/learn") == -1 {
 			return
@@ -75,18 +72,16 @@ func main() {
 	// Extract details of the course
 	detailCollector.OnHTML(`div[id=rendered-content]`, func(e *colly.HTMLElement) {
 		log.Println("Course found", e.Request.URL)
-		title := e.ChildText(".course-title")
+		title := e.DOM.Find(".course-title").Text()
 		if title == "" {
 			log.Println("No title found", e.Request.URL)
 		}
 		course := Course{
 			Title:       title,
 			URL:         e.Request.URL.String(),
-			Description: e.ChildText("div.content"),
-			Creator:     e.ChildText("div.creator-names > span"),
+			Description: e.DOM.Find("div.content").Text(),
+			Creator:     e.DOM.Find("div.creator-names > span").Text(),
 		}
-		// Iterate over rows of the table which contains different information
-		// about the course
 		e.DOM.Find("table.basic-info-table tr").Each(func(_ int, s *goquery.Selection) {
 			switch s.Find("td:first-child").Text() {
 			case "Language":
@@ -107,12 +102,9 @@ func main() {
 	// Start scraping on http://coursera.com/browse
 	c.Visit("https://coursera.org/browse")
 
-	// Convert results to JSON data if the scraping job has finished
 	jsonData, err := json.MarshalIndent(courses, "", "  ")
 	if err != nil {
 		panic(err)
 	}
-
-	// Dump json to the standard output (can be redirected to a file)
 	fmt.Println(string(jsonData))
 }
