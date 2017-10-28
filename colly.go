@@ -42,7 +42,7 @@ type Collector struct {
 	// AllowURLRevisit allows multiple downloads of the same URL
 	AllowURLRevisit bool
 	// MaxBodySize is the limit of the retrieved response body in bytes.
-	// `0` means unlimited.
+	// 0 means unlimited.
 	// The default value for MaxBodySize is 10MB (10 * 1024 * 1024 bytes).
 	MaxBodySize int
 	// CacheDir specifies a location where GET requests are cached as files.
@@ -353,8 +353,8 @@ func (c *Collector) OnResponse(f ResponseCallback) {
 }
 
 // OnHTML registers a function. Function will be executed on every HTML
-// element matched by the `goquerySelector` parameter.
-// `goquerySelector` is a selector used by https://github.com/PuerkitoBio/goquery
+// element matched by the GoQuery Selector parameter.
+// GoQuery Selector is a selector used by https://github.com/PuerkitoBio/goquery
 func (c *Collector) OnHTML(goquerySelector string, f HTMLCallback) {
 	c.lock.Lock()
 	c.htmlCallbacks[goquerySelector] = f
@@ -391,8 +391,8 @@ func (c *Collector) SetRequestTimeout(timeout time.Duration) {
 	c.backend.Client.Timeout = timeout
 }
 
-// SetProxy sets a proxy for the collector. This overrides the default RoundTripper
-// transport if no custom transport is set
+// SetProxy sets a proxy for the collector. This overrides the previously
+// used http.Transport if the type of the transport is not http.RoundTripper
 func (c *Collector) SetProxy(proxyURL string) error {
 	proxyParsed, err := url.Parse(proxyURL)
 	if err != nil {
@@ -470,12 +470,12 @@ func (c *Collector) handleOnError(response *Response, err error, request *Reques
 	return err
 }
 
-// Limit adds a new `LimitRule` to the collector
+// Limit adds a new LimitRule to the collector
 func (c *Collector) Limit(rule *LimitRule) error {
 	return c.backend.Limit(rule)
 }
 
-// Limits adds new `LimitRule`s to the collector
+// Limits adds new LimitRules to the collector
 func (c *Collector) Limits(rules []*LimitRule) error {
 	return c.backend.Limits(rules)
 }
@@ -543,6 +543,12 @@ func (h *HTMLElement) Attr(k string) string {
 		}
 	}
 	return ""
+}
+
+// ChildText returns the concatenated and stripped text content of the matching
+// elements.
+func (h *HTMLElement) ChildText(goquerySelector string) string {
+	return strings.TrimSpace(h.DOM.Find(goquerySelector).Text())
 }
 
 // AbsoluteURL returns with the resolved absolute URL of an URL chunk.
@@ -614,7 +620,7 @@ func (c *Context) Put(key, value string) {
 	c.lock.Unlock()
 }
 
-// Get retrieves a value from Context. If no value found for `k`
+// Get retrieves a value from Context.
 // Get returns an empty string if key not found
 func (c *Context) Get(key string) string {
 	c.lock.RLock()
