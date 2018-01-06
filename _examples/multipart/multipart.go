@@ -46,7 +46,9 @@ func main() {
 	// Start a single route http server to post an image to.
 	setupServer()
 
-	c := colly.NewCollector(colly.AllowURLRevisit(), colly.MaxDepth(5))
+	c := colly.NewCollector()
+	c.AllowURLRevisit = true
+	c.MaxDepth = 5
 
 	// On every a element which has href attribute call callback
 	c.OnHTML("html", func(e *colly.HTMLElement) {

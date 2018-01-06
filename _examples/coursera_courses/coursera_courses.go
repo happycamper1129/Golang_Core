@@ -2,8 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
-	"os"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
@@ -25,14 +25,14 @@ type Course struct {
 
 func main() {
 	// Instantiate default collector
-	c := colly.NewCollector(
-		// Visit only domains: coursera.org, www.coursera.org
-		colly.AllowedDomains("coursera.org", "www.coursera.org"),
+	c := colly.NewCollector()
 
-		// Cache responses to prevent multiple download of pages
-		// even if the collector is restarted
-		colly.CacheDir("./coursera_cache"),
-	)
+	// Visit only domains: coursera.org, www.coursera.org
+	c.AllowedDomains = []string{"coursera.org", "www.coursera.org"}
+
+	// Cache responses to prevent multiple download of pages
+	// even if the collector is restarted
+	c.CacheDir = "./coursera_cache"
 
 	// Create another collector to scrape course details
 	detailCollector := c.Clone()
@@ -104,9 +104,12 @@ func main() {
 	// Start scraping on http://coursera.com/browse
 	c.Visit("https://coursera.org/browse")
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
+	// Convert results to JSON data if the scraping job has finished
+	jsonData, err := json.MarshalIndent(courses, "", "  ")
+	if err != nil {
+		panic(err)
+	}
 
-	// Dump json to the standard output
-	enc.Encode(courses)
+	// Dump json to the standard output (can be redirected to a file)
+	fmt.Println(string(jsonData))
 }

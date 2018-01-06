@@ -3,8 +3,8 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
-	"os"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
@@ -87,9 +87,12 @@ func main() {
 
 	threadCollector.Visit("https://groups.google.com/forum/?_escaped_fragment_=forum/" + groupName)
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
+	// Convert results to JSON data if the scraping job has finished
+	jsonData, err := json.MarshalIndent(threads, "", "  ")
+	if err != nil {
+		panic(err)
+	}
 
-	// Dump json to the standard output
-	enc.Encode(threads)
+	// Dump json to the standard output (can be redirected to a file)
+	fmt.Println(string(jsonData))
 }
