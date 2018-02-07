@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"strconv"
 
+	"github.com/PuerkitoBio/goquery"
 	"github.com/gocolly/colly"
 )
 
@@ -35,10 +36,10 @@ func main() {
 
 	d.OnHTML("body", func(e *colly.HTMLElement) {
 		t := make([]transcript, 0)
-		e.ForEach(".topic-media-row", func(_ int, el *colly.HTMLElement) {
+		e.DOM.Find(".topic-media-row").Each(func(_ int, s *goquery.Selection) {
 			t = append(t, transcript{
-				Speaker: el.ChildText(".speaker-label"),
-				Text:    el.ChildText(".transcript-text-block"),
+				Speaker: s.Find(".speaker-label").Text(),
+				Text:    s.Find(".transcript-text-block").Text(),
 			})
 		})
 		jsonData, err := json.MarshalIndent(t, "", "  ")
