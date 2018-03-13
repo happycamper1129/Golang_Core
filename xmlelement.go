@@ -1,3 +1,17 @@
+// Copyright 2018 Adam Tauber
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package colly
 
 import (
@@ -75,19 +89,10 @@ func (h *XMLElement) Attr(k string) string {
 // elements.
 func (h *XMLElement) ChildText(xpathQuery string) string {
 	if h.isHTML {
-		child := htmlquery.FindOne(h.DOM.(*html.Node), xpathQuery)
-		if child == nil {
-			return ""
-		}
-		return strings.TrimSpace(htmlquery.InnerText(child))
+		return strings.TrimSpace(htmlquery.InnerText(htmlquery.FindOne(h.DOM.(*html.Node), xpathQuery)))
 	}
-	child := xmlquery.FindOne(h.DOM.(*xmlquery.Node), xpathQuery)
-	if child == nil {
-		return ""
-	}
-	return strings.TrimSpace(child.InnerText())
+	return strings.TrimSpace(xmlquery.FindOne(h.DOM.(*xmlquery.Node), xpathQuery).InnerText())
 }
-
 
 // ChildAttr returns the stripped text content of the first matching
 // element's attribute.
@@ -138,18 +143,3 @@ func (h *XMLElement) ChildAttrs(xpathQuery, attrName string) []string {
 	}
 	return res
 }
-
-func (h *XMLElement) ChildTexts(xpathQuery string) []string {
-        texts := make([]string, 0)
-        if h.isHTML {
-                htmlquery.FindEach(h.DOM.(*html.Node), xpathQuery, func(i int, child *html.Node) {
-                        texts = append(texts, strings.TrimSpace(htmlquery.InnerText(child)))
-                                })
-        } else {
-                xmlquery.FindEach(h.DOM.(*xmlquery.Node), xpathQuery, func(i int, child *xmlquery.Node) {
-                        texts = append(texts, strings.TrimSpace(child.InnerText()))
-                })
-        }
-        return texts
-}
-

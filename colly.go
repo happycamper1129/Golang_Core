@@ -1,3 +1,17 @@
+// Copyright 2018 Adam Tauber
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // Package colly implements a HTTP scraping framework
 package colly
 
@@ -32,8 +46,8 @@ import (
 	"github.com/kennygrant/sanitize"
 	"github.com/temoto/robotstxt"
 
-	"github.com/sharmi/colly/debug"
-	"github.com/sharmi/colly/storage"
+	"github.com/gocolly/colly/debug"
+	"github.com/gocolly/colly/storage"
 )
 
 // Collector provides the scraper instance for a scraping job
@@ -123,6 +137,11 @@ type htmlCallbackContainer struct {
 type xmlCallbackContainer struct {
 	Query    string
 	Function XMLCallback
+}
+
+type cookieJarSerializer struct {
+	store storage.Storage
+	lock  *sync.RWMutex
 }
 
 var collectorCounter uint32
@@ -312,7 +331,8 @@ func (c *Collector) Init() {
 	c.store.Init()
 	c.MaxBodySize = 10 * 1024 * 1024
 	c.backend = &httpBackend{}
-	c.backend.Init(c.store.GetCookieJar())
+	jar, _ := cookiejar.New(nil)
+	c.backend.Init(jar)
 	c.backend.Client.CheckRedirect = c.checkRedirectFunc()
 	c.wg = &sync.WaitGroup{}
 	c.lock = &sync.RWMutex{}
@@ -718,7 +738,7 @@ func (c *Collector) SetStorage(s storage.Storage) error {
 		return err
 	}
 	c.store = s
-	c.backend.Client.Jar = s.GetCookieJar()
+	c.backend.Client.Jar = createJar(s)
 	return nil
 }
 
@@ -1067,4 +1087,44 @@ func isYesString(s string) bool {
 		return true
 	}
 	return false
+}
+
+func createJar(s storage.Storage) http.CookieJar {
+	return &cookieJarSerializer{store: s, lock: &sync.RWMutex{}}
+}
+
+func (j *cookieJarSerializer) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	j.lock.Lock()
+	defer j.lock.Unlock()
+	cookieStr := j.store.Cookies(u)
+
+	// Merge existing cookies, new cookies have precendence.
+	cnew := make([]*http.Cookie, len(cookies))
+	copy(cnew, cookies)
+	existing := storage.UnstringifyCookies(cookieStr)
+	for _, c := range existing {
+		if !storage.ContainsCookie(cnew, c.Name) {
+			cnew = append(cnew, c)
+		}
+	}
+	j.store.SetCookies(u, storage.StringifyCookies(cnew))
+}
+
+func (j *cookieJarSerializer) Cookies(u *url.URL) []*http.Cookie {
+	cookies := storage.UnstringifyCookies(j.store.Cookies(u))
+	// Filter.
+	now := time.Now()
+	cnew := make([]*http.Cookie, 0, len(cookies))
+	for _, c := range cookies {
+		// Drop expired cookies.
+		if c.RawExpires != "" && c.Expires.Before(now) {
+			continue
+		}
+		// Drop secure cookies if not over https.
+		if c.Secure && u.Scheme != "https" {
+			continue
+		}
+		cnew = append(cnew, c)
+	}
+	return cnew
 }
