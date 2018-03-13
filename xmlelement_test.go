@@ -1,25 +1,11 @@
-// Copyright 2018 Adam Tauber
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package colly_test
 
 import (
 	"strings"
 	"testing"
-
 	"github.com/antchfx/htmlquery"
-	"github.com/gocolly/colly"
+	"github.com/sharmi/colly"
+	"reflect"
 )
 
 // Borrowed from http://infohost.nmt.edu/tcc/help/pubs/xhtml/example.html
@@ -41,7 +27,7 @@ const htmlPage = `
         First bullet of a bullet list.
       </li>
       <li class="list-item-2">
-        This is the <em>second</em> bullet.
+        This is the <em>second</em> bullet. 
       </li>
     </ul>
   </body>
@@ -72,8 +58,24 @@ func TestChildText(t *testing.T) {
 	if text := xmlElem.ChildText("//p"); text != "This is a regular text paragraph." {
 		t.Fatalf("failed child tag test: %v != This is a regular text paragraph.", text)
 	}
+	if text := xmlElem.ChildText("//dl"); text != "" {
+		t.Fatalf("failed child tag test: %v != \"\"", text)
+	}
 }
 
+func TestChildTexts(t *testing.T) {
+	resp := &colly.Response{StatusCode: 200, Body: []byte(htmlPage)}
+	doc, _ := htmlquery.Parse(strings.NewReader(htmlPage))
+	xmlNode := htmlquery.FindOne(doc, "/html")
+	xmlElem := colly.NewXMLElementFromHTMLNode(resp, xmlNode)
+	expected := []string{"First bullet of a bullet list.", "This is the second bullet."}
+	if texts := xmlElem.ChildTexts("//li"); reflect.DeepEqual(texts, expected) == false  {
+		t.Fatalf("failed child tags test: %v != %v", texts, expected)
+	}
+	if texts := xmlElem.ChildTexts("//dl"); reflect.DeepEqual(texts, make([]string, 0)) == false{
+		t.Fatalf("failed child tag test: %v != \"\"", texts)
+	}
+}
 func TestChildAttr(t *testing.T) {
 	resp := &colly.Response{StatusCode: 200, Body: []byte(htmlPage)}
 	doc, _ := htmlquery.Parse(strings.NewReader(htmlPage))
