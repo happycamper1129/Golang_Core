@@ -504,10 +504,10 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 	u = parsedURL.String()
 	c.wg.Add(1)
 	if c.Async {
-		go c.fetch(u, method, depth, requestData, ctx, hdr, checkRevisit, req)
+		go c.fetch(u, method, depth, requestData, ctx, hdr, req)
 		return nil
 	}
-	return c.fetch(u, method, depth, requestData, ctx, hdr, checkRevisit, req)
+	return c.fetch(u, method, depth, requestData, ctx, hdr, req)
 }
 
 func setRequestBody(req *http.Request, body io.Reader) {
@@ -542,7 +542,7 @@ func setRequestBody(req *http.Request, body io.Reader) {
 	}
 }
 
-func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, checkRevisit bool, req *http.Request) error {
+func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, req *http.Request) error {
 	defer c.wg.Done()
 	if ctx == nil {
 		ctx = NewContext()
@@ -587,19 +587,13 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 
 	c.handleOnResponse(response)
 
-	err = c.handleOnHTML(response)
-	if err != nil {
-		c.handleOnError(response, err, request, ctx)
-	}
+	c.handleOnHTML(response)
 
-	err = c.handleOnXML(response)
-	if err != nil {
-		c.handleOnError(response, err, request, ctx)
-	}
+	c.handleOnXML(response)
 
 	c.handleOnScraped(response)
 
-	return err
+	return nil
 }
 
 func (c *Collector) requestCheck(u, method string, depth int, checkRevisit bool) error {
@@ -918,13 +912,13 @@ func (c *Collector) handleOnResponse(r *Response) {
 	}
 }
 
-func (c *Collector) handleOnHTML(resp *Response) error {
+func (c *Collector) handleOnHTML(resp *Response) {
 	if len(c.htmlCallbacks) == 0 || !strings.Contains(strings.ToLower(resp.Headers.Get("Content-Type")), "html") {
-		return nil
+		return
 	}
 	doc, err := goquery.NewDocumentFromReader(bytes.NewBuffer(resp.Body))
 	if err != nil {
-		return err
+		return
 	}
 	if href, found := doc.Find("base[href]").Attr("href"); found {
 		resp.Request.baseURL, _ = url.Parse(href)
@@ -943,22 +937,21 @@ func (c *Collector) handleOnHTML(resp *Response) error {
 			}
 		})
 	}
-	return nil
 }
 
-func (c *Collector) handleOnXML(resp *Response) error {
+func (c *Collector) handleOnXML(resp *Response) {
 	if len(c.xmlCallbacks) == 0 {
-		return nil
+		return
 	}
 	contentType := strings.ToLower(resp.Headers.Get("Content-Type"))
 	if !strings.Contains(contentType, "html") && !strings.Contains(contentType, "xml") {
-		return nil
+		return
 	}
 
 	if strings.Contains(contentType, "html") {
 		doc, err := htmlquery.Parse(bytes.NewBuffer(resp.Body))
 		if err != nil {
-			return err
+			return
 		}
 		if e := htmlquery.FindOne(doc, "//base/@href"); e != nil {
 			for _, a := range e.Attr {
@@ -984,7 +977,7 @@ func (c *Collector) handleOnXML(resp *Response) error {
 	} else if strings.Contains(contentType, "xml") {
 		doc, err := xmlquery.Parse(bytes.NewBuffer(resp.Body))
 		if err != nil {
-			return err
+			return
 		}
 
 		for _, cc := range c.xmlCallbacks {
@@ -1000,14 +993,13 @@ func (c *Collector) handleOnXML(resp *Response) error {
 			})
 		}
 	}
-	return nil
 }
 
 func (c *Collector) handleOnError(response *Response, err error, request *Request, ctx *Context) error {
 	if err == nil && (c.ParseHTTPErrorResponse || response.StatusCode < 203) {
 		return nil
 	}
-	if err == nil && response.StatusCode >= 203 {
+	if err == nil {
 		err = errors.New(http.StatusText(response.StatusCode))
 	}
 	if response == nil {
