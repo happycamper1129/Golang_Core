@@ -1,24 +1,9 @@
-// Copyright 2018 Adam Tauber
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 // Package colly implements a HTTP scraping framework
 package colly
 
 import (
 	"bytes"
 	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -63,20 +48,11 @@ type Collector struct {
 	AllowedDomains []string
 	// DisallowedDomains is a domain blacklist.
 	DisallowedDomains []string
-	// DisallowedURLFilters is a list of regular expressions which restricts
-	// visiting URLs. If any of the rules matches to a URL the
-	// request will be stopped. DisallowedURLFilters will
-	// be evaluated before URLFilters
-	// Leave it blank to allow any URLs to be visited
-	DisallowedURLFilters []*regexp.Regexp
 	// URLFilters is a list of regular expressions which restricts
 	// visiting URLs. If any of the rules matches to a URL the
-	// request won't be stopped. DisallowedURLFilters will
-	// be evaluated before URLFilters
-
+	// request won't be stopped.
 	// Leave it blank to allow any URLs to be visited
 	URLFilters []*regexp.Regexp
-
 	// AllowURLRevisit allows multiple downloads of the same URL
 	AllowURLRevisit bool
 	// MaxBodySize is the limit of the retrieved response body in bytes.
@@ -101,9 +77,7 @@ type Collector struct {
 	ID uint32
 	// DetectCharset can enable character encoding detection for non-utf8 response bodies
 	// without explicit charset declaration. This feature uses https://github.com/saintfish/chardet
-	DetectCharset bool
-	// RedirectHandler allows control on how a redirect will be managed
-	RedirectHandler   func(req *http.Request, via []*http.Request) error
+	DetectCharset     bool
 	store             storage.Storage
 	debugger          debug.Debugger
 	robotsMap         map[string]*robotstxt.RobotsData
@@ -151,11 +125,6 @@ type xmlCallbackContainer struct {
 	Function XMLCallback
 }
 
-type cookieJarSerializer struct {
-	store storage.Storage
-	lock  *sync.RWMutex
-}
-
 var collectorCounter uint32
 
 var (
@@ -166,10 +135,6 @@ var (
 	ErrMissingURL = errors.New("Missing URL")
 	// ErrMaxDepth is the error type for exceeding max depth
 	ErrMaxDepth = errors.New("Max depth limit reached")
-	// ErrForbiddenURL is the error thrown if visiting
-	// a URL which is not allowed by URLFilters
-	ErrForbiddenURL = errors.New("ForbiddenURL")
-
 	// ErrNoURLFiltersMatch is the error thrown if visiting
 	// a URL which is not allowed by URLFilters
 	ErrNoURLFiltersMatch = errors.New("No URLFilters match")
@@ -201,13 +166,6 @@ var envMap = map[string]func(*Collector, string){
 	},
 	"IGNORE_ROBOTSTXT": func(c *Collector, val string) {
 		c.IgnoreRobotsTxt = isYesString(val)
-	},
-	"FOLLOW_REDIRECTS": func(c *Collector, val string) {
-		if !isYesString(val) {
-			c.RedirectHandler = func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			}
-		}
 	},
 	"MAX_BODY_SIZE": func(c *Collector, val string) {
 		size, err := strconv.Atoi(val)
@@ -275,14 +233,6 @@ func ParseHTTPErrorResponse() func(*Collector) {
 func DisallowedDomains(domains ...string) func(*Collector) {
 	return func(c *Collector) {
 		c.DisallowedDomains = domains
-	}
-}
-
-// DisallowedURLFilters sets the list of regular expressions which restricts
-// visiting URLs. If any of the rules matches to a URL the request will be stopped.
-func DisallowedURLFilters(filters ...*regexp.Regexp) func(*Collector) {
-	return func(c *Collector) {
-		c.DisallowedURLFilters = filters
 	}
 }
 
@@ -362,8 +312,7 @@ func (c *Collector) Init() {
 	c.store.Init()
 	c.MaxBodySize = 10 * 1024 * 1024
 	c.backend = &httpBackend{}
-	jar, _ := cookiejar.New(nil)
-	c.backend.Init(jar)
+	c.backend.Init(c.store.GetCookieJar())
 	c.backend.Client.CheckRedirect = c.checkRedirectFunc()
 	c.wg = &sync.WaitGroup{}
 	c.lock = &sync.RWMutex{}
@@ -435,35 +384,6 @@ func (c *Collector) SetDebugger(d debug.Debugger) {
 	c.debugger = d
 }
 
-// UnmarshalRequest creates a Request from serialized data
-func (c *Collector) UnmarshalRequest(r []byte) (*Request, error) {
-	req := &serializableRequest{}
-	err := json.Unmarshal(r, req)
-	if err != nil {
-		return nil, err
-	}
-
-	u, err := url.Parse(req.URL)
-	if err != nil {
-		return nil, err
-	}
-
-	ctx := NewContext()
-	for k, v := range req.Ctx {
-		ctx.Put(k, v)
-	}
-
-	return &Request{
-		Method:    req.Method,
-		URL:       u,
-		Body:      bytes.NewReader(req.Body),
-		Ctx:       ctx,
-		ID:        atomic.AddUint32(&c.requestCount, 1),
-		Headers:   &http.Header{},
-		collector: c,
-	}, nil
-}
-
 func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, checkRevisit bool) error {
 	if err := c.requestCheck(u, method, depth, checkRevisit); err != nil {
 		return err
@@ -500,49 +420,16 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 		Body:       rc,
 		Host:       parsedURL.Host,
 	}
-	setRequestBody(req, requestData)
 	u = parsedURL.String()
 	c.wg.Add(1)
 	if c.Async {
-		go c.fetch(u, method, depth, requestData, ctx, hdr, req)
+		go c.fetch(u, method, depth, requestData, ctx, hdr, checkRevisit, req)
 		return nil
 	}
-	return c.fetch(u, method, depth, requestData, ctx, hdr, req)
+	return c.fetch(u, method, depth, requestData, ctx, hdr, checkRevisit, req)
 }
 
-func setRequestBody(req *http.Request, body io.Reader) {
-	if body != nil {
-		switch v := body.(type) {
-		case *bytes.Buffer:
-			req.ContentLength = int64(v.Len())
-			buf := v.Bytes()
-			req.GetBody = func() (io.ReadCloser, error) {
-				r := bytes.NewReader(buf)
-				return ioutil.NopCloser(r), nil
-			}
-		case *bytes.Reader:
-			req.ContentLength = int64(v.Len())
-			snapshot := *v
-			req.GetBody = func() (io.ReadCloser, error) {
-				r := snapshot
-				return ioutil.NopCloser(&r), nil
-			}
-		case *strings.Reader:
-			req.ContentLength = int64(v.Len())
-			snapshot := *v
-			req.GetBody = func() (io.ReadCloser, error) {
-				r := snapshot
-				return ioutil.NopCloser(&r), nil
-			}
-		}
-		if req.GetBody != nil && req.ContentLength == 0 {
-			req.Body = http.NoBody
-			req.GetBody = func() (io.ReadCloser, error) { return http.NoBody, nil }
-		}
-	}
-}
-
-func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, req *http.Request) error {
+func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, checkRevisit bool, req *http.Request) error {
 	defer c.wg.Done()
 	if ctx == nil {
 		ctx = NewContext()
@@ -587,19 +474,13 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 
 	c.handleOnResponse(response)
 
-	err = c.handleOnHTML(response)
-	if err != nil {
-		c.handleOnError(response, err, request, ctx)
-	}
+	c.handleOnHTML(response)
 
-	err = c.handleOnXML(response)
-	if err != nil {
-		c.handleOnError(response, err, request, ctx)
-	}
+	c.handleOnXML(response)
 
 	c.handleOnScraped(response)
 
-	return err
+	return nil
 }
 
 func (c *Collector) requestCheck(u, method string, depth int, checkRevisit bool) error {
@@ -609,13 +490,15 @@ func (c *Collector) requestCheck(u, method string, depth int, checkRevisit bool)
 	if c.MaxDepth > 0 && c.MaxDepth < depth {
 		return ErrMaxDepth
 	}
-	if len(c.DisallowedURLFilters) > 0 {
-		if isMatchingFilter(c.DisallowedURLFilters, []byte(u)) {
-			return ErrForbiddenURL
-		}
-	}
 	if len(c.URLFilters) > 0 {
-		if !isMatchingFilter(c.URLFilters, []byte(u)) {
+		matched := false
+		for _, r := range c.URLFilters {
+			if r.Match([]byte(u)) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			return ErrNoURLFiltersMatch
 		}
 	}
@@ -653,16 +536,17 @@ func (c *Collector) isDomainAllowed(domain string) bool {
 }
 
 func (c *Collector) checkRobots(u *url.URL) error {
+	// var robot *robotstxt.RobotsData
+	// var ok bool
+	var err error
+
 	c.lock.RLock()
 	robot, ok := c.robotsMap[u.Host]
 	c.lock.RUnlock()
 
 	if !ok {
 		// no robots file cached
-		resp, err := c.backend.Client.Get(u.Scheme + "://" + u.Host + "/robots.txt")
-		if err != nil {
-			return err
-		}
+		resp, _ := c.backend.Client.Get(u.Scheme + "://" + u.Host + "/robots.txt")
 		robot, err = robotstxt.FromResponse(resp)
 		if err != nil {
 			return err
@@ -834,7 +718,7 @@ func (c *Collector) SetStorage(s storage.Storage) error {
 		return err
 	}
 	c.store = s
-	c.backend.Client.Jar = createJar(s)
+	c.backend.Client.Jar = s.GetCookieJar()
 	return nil
 }
 
@@ -904,16 +788,13 @@ func (c *Collector) handleOnResponse(r *Response) {
 	}
 }
 
-func (c *Collector) handleOnHTML(resp *Response) error {
+func (c *Collector) handleOnHTML(resp *Response) {
 	if len(c.htmlCallbacks) == 0 || !strings.Contains(strings.ToLower(resp.Headers.Get("Content-Type")), "html") {
-		return nil
+		return
 	}
 	doc, err := goquery.NewDocumentFromReader(bytes.NewBuffer(resp.Body))
 	if err != nil {
-		return err
-	}
-	if href, found := doc.Find("base[href]").Attr("href"); found {
-		resp.Request.baseURL, _ = url.Parse(href)
+		return
 	}
 	for _, cc := range c.htmlCallbacks {
 		doc.Find(cc.Selector).Each(func(i int, s *goquery.Selection) {
@@ -929,30 +810,21 @@ func (c *Collector) handleOnHTML(resp *Response) error {
 			}
 		})
 	}
-	return nil
 }
 
-func (c *Collector) handleOnXML(resp *Response) error {
+func (c *Collector) handleOnXML(resp *Response) {
 	if len(c.xmlCallbacks) == 0 {
-		return nil
+		return
 	}
 	contentType := strings.ToLower(resp.Headers.Get("Content-Type"))
 	if !strings.Contains(contentType, "html") && !strings.Contains(contentType, "xml") {
-		return nil
+		return
 	}
 
 	if strings.Contains(contentType, "html") {
 		doc, err := htmlquery.Parse(bytes.NewBuffer(resp.Body))
 		if err != nil {
-			return err
-		}
-		if e := htmlquery.FindOne(doc, "//base/@href"); e != nil {
-			for _, a := range e.Attr {
-				if a.Key == "href" {
-					resp.Request.baseURL, _ = url.Parse(a.Val)
-					break
-				}
-			}
+			return
 		}
 
 		for _, cc := range c.xmlCallbacks {
@@ -970,7 +842,7 @@ func (c *Collector) handleOnXML(resp *Response) error {
 	} else if strings.Contains(contentType, "xml") {
 		doc, err := xmlquery.Parse(bytes.NewBuffer(resp.Body))
 		if err != nil {
-			return err
+			return
 		}
 
 		for _, cc := range c.xmlCallbacks {
@@ -986,14 +858,13 @@ func (c *Collector) handleOnXML(resp *Response) error {
 			})
 		}
 	}
-	return nil
 }
 
 func (c *Collector) handleOnError(response *Response, err error, request *Request, ctx *Context) error {
 	if err == nil && (c.ParseHTTPErrorResponse || response.StatusCode < 203) {
 		return nil
 	}
-	if err == nil && response.StatusCode >= 203 {
+	if err == nil {
 		err = errors.New(http.StatusText(response.StatusCode))
 	}
 	if response == nil {
@@ -1072,15 +943,12 @@ func (c *Collector) Cookies(URL string) []*http.Cookie {
 func (c *Collector) Clone() *Collector {
 	return &Collector{
 		AllowedDomains:         c.AllowedDomains,
-		AllowURLRevisit:        c.AllowURLRevisit,
 		CacheDir:               c.CacheDir,
-		DetectCharset:          c.DetectCharset,
 		DisallowedDomains:      c.DisallowedDomains,
 		ID:                     atomic.AddUint32(&collectorCounter, 1),
 		IgnoreRobotsTxt:        c.IgnoreRobotsTxt,
 		MaxBodySize:            c.MaxBodySize,
 		MaxDepth:               c.MaxDepth,
-		DisallowedURLFilters:   c.DisallowedURLFilters,
 		URLFilters:             c.URLFilters,
 		ParseHTTPErrorResponse: c.ParseHTTPErrorResponse,
 		UserAgent:              c.UserAgent,
@@ -1088,11 +956,8 @@ func (c *Collector) Clone() *Collector {
 		backend:                c.backend,
 		debugger:               c.debugger,
 		Async:                  c.Async,
-		RedirectHandler:        c.RedirectHandler,
 		errorCallbacks:         make([]ErrorCallback, 0, 8),
 		htmlCallbacks:          make([]*htmlCallbackContainer, 0, 8),
-		xmlCallbacks:           make([]*xmlCallbackContainer, 0, 8),
-		scrapedCallbacks:       make([]ScrapedCallback, 0, 8),
 		lock:                   c.lock,
 		requestCallbacks:       make([]RequestCallback, 0, 8),
 		responseCallbacks:      make([]ResponseCallback, 0, 8),
@@ -1105,10 +970,6 @@ func (c *Collector) checkRedirectFunc() func(req *http.Request, via []*http.Requ
 	return func(req *http.Request, via []*http.Request) error {
 		if !c.isDomainAllowed(req.URL.Host) {
 			return fmt.Errorf("Not following redirect to %s because its not in AllowedDomains", req.URL.Host)
-		}
-
-		if c.RedirectHandler != nil {
-			return c.RedirectHandler(req, via)
 		}
 
 		// Honor golangs default of maximum of 10 redirects
@@ -1204,55 +1065,6 @@ func isYesString(s string) bool {
 	switch strings.ToLower(s) {
 	case "1", "yes", "true", "y":
 		return true
-	}
-	return false
-}
-
-func createJar(s storage.Storage) http.CookieJar {
-	return &cookieJarSerializer{store: s, lock: &sync.RWMutex{}}
-}
-
-func (j *cookieJarSerializer) SetCookies(u *url.URL, cookies []*http.Cookie) {
-	j.lock.Lock()
-	defer j.lock.Unlock()
-	cookieStr := j.store.Cookies(u)
-
-	// Merge existing cookies, new cookies have precedence.
-	cnew := make([]*http.Cookie, len(cookies))
-	copy(cnew, cookies)
-	existing := storage.UnstringifyCookies(cookieStr)
-	for _, c := range existing {
-		if !storage.ContainsCookie(cnew, c.Name) {
-			cnew = append(cnew, c)
-		}
-	}
-	j.store.SetCookies(u, storage.StringifyCookies(cnew))
-}
-
-func (j *cookieJarSerializer) Cookies(u *url.URL) []*http.Cookie {
-	cookies := storage.UnstringifyCookies(j.store.Cookies(u))
-	// Filter.
-	now := time.Now()
-	cnew := make([]*http.Cookie, 0, len(cookies))
-	for _, c := range cookies {
-		// Drop expired cookies.
-		if c.RawExpires != "" && c.Expires.Before(now) {
-			continue
-		}
-		// Drop secure cookies if not over https.
-		if c.Secure && u.Scheme != "https" {
-			continue
-		}
-		cnew = append(cnew, c)
-	}
-	return cnew
-}
-
-func isMatchingFilter(fs []*regexp.Regexp, d []byte) bool {
-	for _, r := range fs {
-		if r.Match(d) {
-			return true
-		}
 	}
 	return false
 }

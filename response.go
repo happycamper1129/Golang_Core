@@ -1,17 +1,3 @@
-// Copyright 2018 Adam Tauber
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package colly
 
 import (
@@ -55,7 +41,7 @@ func (r *Response) FileName() string {
 	if r.Request.URL.RawQuery != "" {
 		return SanitizeFileName(fmt.Sprintf("%s_%s", r.Request.URL.Path, r.Request.URL.RawQuery))
 	}
-	return SanitizeFileName(strings.TrimPrefix(r.Request.URL.Path, "/"))
+	return SanitizeFileName(r.Request.URL.Path[1:])
 }
 
 func (r *Response) fixCharset(detectCharset bool, defaultEncoding string) error {
