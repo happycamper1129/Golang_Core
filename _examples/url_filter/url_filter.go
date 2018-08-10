@@ -32,6 +32,6 @@ func main() {
 		fmt.Println("Visiting", r.URL.String())
 	})
 
-	// Start scraping on http://httpbin.org
+	// Start scraping on https://hackerspaces.org
 	c.Visit("http://httpbin.org/")
 }
