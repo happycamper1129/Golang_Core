@@ -403,7 +403,15 @@ func (c *Collector) Appengine(ctx context.Context) {
 // request to the URL specified in parameter.
 // Visit also calls the previously provided callbacks
 func (c *Collector) Visit(URL string) error {
+	if check := c.scrape(URL, "HEAD", 1, nil, nil, nil, true); check != nil {
+		return check
+	}
 	return c.scrape(URL, "GET", 1, nil, nil, nil, true)
+}
+
+// Head starts a collector job by creating a HEAD request.
+func (c *Collector) Head(URL string) error {
+	return c.scrape(URL, "HEAD", 1, nil, nil, nil, false)
 }
 
 // Post starts a collector job by creating a POST request.
@@ -433,6 +441,7 @@ func (c *Collector) PostMultipart(URL string, requestData map[string][]byte) err
 // Set requestData, ctx, hdr parameters to nil if you don't want to use them.
 // Valid methods:
 //   - "GET"
+//   - "HEAD"
 //   - "POST"
 //   - "PUT"
 //   - "DELETE"
@@ -491,7 +500,7 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 	if !c.isDomainAllowed(parsedURL.Host) {
 		return ErrForbiddenDomain
 	}
-	if !c.IgnoreRobotsTxt {
+	if method != "HEAD" && !c.IgnoreRobotsTxt {
 		if err = c.checkRobots(parsedURL); err != nil {
 			return err
 		}
@@ -587,15 +596,15 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 
 	origURL := req.URL
 	response, err := c.backend.Cache(req, c.MaxBodySize, c.CacheDir)
+	if proxyURL, ok := req.Context().Value(ProxyURLKey).(string); ok {
+		request.ProxyURL = proxyURL
+	}
 	if err := c.handleOnError(response, err, request, ctx); err != nil {
 		return err
 	}
 	if req.URL != origURL {
 		request.URL = req.URL
 		request.Headers = &req.Header
-	}
-	if proxyURL, ok := req.Context().Value(ProxyURLKey).(string); ok {
-		request.ProxyURL = proxyURL
 	}
 	atomic.AddUint32(&c.responseCount, 1)
 	response.Ctx = ctx
@@ -826,6 +835,11 @@ func (c *Collector) OnScraped(f ScrapedCallback) {
 	}
 	c.scrapedCallbacks = append(c.scrapedCallbacks, f)
 	c.lock.Unlock()
+}
+
+// SetClient will override the previously set http.Client
+func (c *Collector) SetClient(client *http.Client) {
+	c.backend.Client = client
 }
 
 // WithTransport allows you to set a custom http.RoundTripper (transport)
