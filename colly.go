@@ -515,12 +515,6 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 	if !ok && requestData != nil {
 		rc = ioutil.NopCloser(requestData)
 	}
-	// The Go HTTP API ignores "Host" in the headers, preferring the client
-	// to use the Host field on Request.
-	host := parsedURL.Host
-	if hostHeader := hdr.Get("Host"); hostHeader != "" {
-		host = hostHeader
-	}
 	req := &http.Request{
 		Method:     method,
 		URL:        parsedURL,
@@ -529,7 +523,7 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 		ProtoMinor: 1,
 		Header:     hdr,
 		Body:       rc,
-		Host:       host,
+		Host:       parsedURL.Host,
 	}
 	setRequestBody(req, requestData)
 	u = parsedURL.String()
