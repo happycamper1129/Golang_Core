@@ -38,14 +38,16 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/appengine/urlfetch"
+
 	"github.com/PuerkitoBio/goquery"
 	"github.com/antchfx/htmlquery"
 	"github.com/antchfx/xmlquery"
-	"github.com/gocolly/colly/debug"
-	"github.com/gocolly/colly/storage"
 	"github.com/kennygrant/sanitize"
 	"github.com/temoto/robotstxt"
-	"google.golang.org/appengine/urlfetch"
+
+	"github.com/gocolly/colly/debug"
+	"github.com/gocolly/colly/storage"
 )
 
 // Collector provides the scraper instance for a scraping job
@@ -100,8 +102,7 @@ type Collector struct {
 	// without explicit charset declaration. This feature uses https://github.com/saintfish/chardet
 	DetectCharset bool
 	// RedirectHandler allows control on how a redirect will be managed
-	// use c.SetRedirectHandler to set this value
-	redirectHandler func(req *http.Request, via []*http.Request) error
+	RedirectHandler func(req *http.Request, via []*http.Request) error
 	// CheckHead performs a HEAD request before every GET to pre-validate the response
 	CheckHead         bool
 	store             storage.Storage
@@ -188,6 +189,8 @@ var (
 	ErrNoCookieJar = errors.New("Cookie jar is not available")
 	// ErrNoPattern is the error type for LimitRules without patterns
 	ErrNoPattern = errors.New("No pattern defined in LimitRule")
+	// ErrEmptyProxyURL is the error type for empty Proxy URL list
+	ErrEmptyProxyURL = errors.New("Proxy URL list is empty")
 )
 
 var envMap = map[string]func(*Collector, string){
@@ -211,7 +214,7 @@ var envMap = map[string]func(*Collector, string){
 	},
 	"FOLLOW_REDIRECTS": func(c *Collector, val string) {
 		if !isYesString(val) {
-			c.redirectHandler = func(req *http.Request, via []*http.Request) error {
+			c.RedirectHandler = func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			}
 		}
@@ -1081,12 +1084,6 @@ func (c *Collector) Limits(rules []*LimitRule) error {
 	return c.backend.Limits(rules)
 }
 
-// SetRedirectHandler instructs the Collector to allow multiple downloads of the same URL
-func (c *Collector) SetRedirectHandler(f func(req *http.Request, via []*http.Request) error) {
-	c.redirectHandler = f
-	c.backend.Client.CheckRedirect = c.checkRedirectFunc()
-}
-
 // SetCookies handles the receipt of the cookies in a reply for the given URL
 func (c *Collector) SetCookies(URL string, cookies []*http.Cookie) error {
 	if c.backend.Client.Jar == nil {
@@ -1135,7 +1132,7 @@ func (c *Collector) Clone() *Collector {
 		backend:                c.backend,
 		debugger:               c.debugger,
 		Async:                  c.Async,
-		redirectHandler:        c.redirectHandler,
+		RedirectHandler:        c.RedirectHandler,
 		errorCallbacks:         make([]ErrorCallback, 0, 8),
 		htmlCallbacks:          make([]*htmlCallbackContainer, 0, 8),
 		xmlCallbacks:           make([]*xmlCallbackContainer, 0, 8),
@@ -1154,8 +1151,8 @@ func (c *Collector) checkRedirectFunc() func(req *http.Request, via []*http.Requ
 			return fmt.Errorf("Not following redirect to %s because its not in AllowedDomains", req.URL.Host)
 		}
 
-		if c.redirectHandler != nil {
-			return c.redirectHandler(req, via)
+		if c.RedirectHandler != nil {
+			return c.RedirectHandler(req, via)
 		}
 
 		// Honor golangs default of maximum of 10 redirects
