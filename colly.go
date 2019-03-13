@@ -500,7 +500,7 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 	if parsedURL.Scheme == "" {
 		parsedURL.Scheme = "http"
 	}
-	if !c.isDomainAllowed(parsedURL.Host) {
+	if !c.isDomainAllowed(parsedURL.Hostname()) {
 		return ErrForbiddenDomain
 	}
 	if method != "HEAD" && !c.IgnoreRobotsTxt {
@@ -982,8 +982,7 @@ func (c *Collector) handleOnXML(resp *Response) error {
 		return nil
 	}
 	contentType := strings.ToLower(resp.Headers.Get("Content-Type"))
-	isXMLFile := strings.HasSuffix(strings.ToLower(resp.Request.URL.Path), ".xml") || strings.HasSuffix(strings.ToLower(resp.Request.URL.Path), ".xml.gz")
-	if !strings.Contains(contentType, "html") && (!strings.Contains(contentType, "xml") && !isXMLFile) {
+	if !strings.Contains(contentType, "html") && !strings.Contains(contentType, "xml") {
 		return nil
 	}
 
@@ -1013,7 +1012,7 @@ func (c *Collector) handleOnXML(resp *Response) error {
 				cc.Function(e)
 			}
 		}
-	} else if strings.Contains(contentType, "xml") || isXMLFile {
+	} else if strings.Contains(contentType, "xml") {
 		doc, err := xmlquery.Parse(bytes.NewBuffer(resp.Body))
 		if err != nil {
 			return err
@@ -1150,7 +1149,7 @@ func (c *Collector) Clone() *Collector {
 
 func (c *Collector) checkRedirectFunc() func(req *http.Request, via []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
-		if !c.isDomainAllowed(req.URL.Host) {
+		if !c.isDomainAllowed(req.URL.Hostname()) {
 			return fmt.Errorf("Not following redirect to %s because its not in AllowedDomains", req.URL.Host)
 		}
 
