@@ -982,7 +982,8 @@ func (c *Collector) handleOnXML(resp *Response) error {
 		return nil
 	}
 	contentType := strings.ToLower(resp.Headers.Get("Content-Type"))
-	if !strings.Contains(contentType, "html") && !strings.Contains(contentType, "xml") {
+	isXMLFile := strings.HasSuffix(strings.ToLower(resp.Request.URL.Path), ".xml") || strings.HasSuffix(strings.ToLower(resp.Request.URL.Path), ".xml.gz")
+	if !strings.Contains(contentType, "html") && (!strings.Contains(contentType, "xml") && !isXMLFile) {
 		return nil
 	}
 
@@ -1012,7 +1013,7 @@ func (c *Collector) handleOnXML(resp *Response) error {
 				cc.Function(e)
 			}
 		}
-	} else if strings.Contains(contentType, "xml") {
+	} else if strings.Contains(contentType, "xml") || isXMLFile {
 		doc, err := xmlquery.Parse(bytes.NewBuffer(resp.Body))
 		if err != nil {
 			return err
@@ -1163,13 +1164,6 @@ func (c *Collector) checkRedirectFunc() func(req *http.Request, via []*http.Requ
 		}
 
 		lastRequest := via[len(via)-1]
-
-		// Copy the headers from last request
-		for hName, hValues := range lastRequest.Header {
-			for _, hValue := range hValues {
-				req.Header.Set(hName, hValue)
-			}
-		}
 
 		// If domain has changed, remove the Authorization-header if it exists
 		if req.URL.Host != lastRequest.URL.Host {
