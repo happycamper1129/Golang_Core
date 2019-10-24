@@ -605,9 +605,6 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 		req.Header.Set("Accept", "*/*")
 	}
 
-	hTrace := &HTTPTrace{}
-	req = hTrace.WithTrace(req)
-
 	origURL := req.URL
 	response, err := c.backend.Cache(req, c.MaxBodySize, c.CacheDir)
 	if proxyURL, ok := req.Context().Value(ProxyURLKey).(string); ok {
@@ -623,7 +620,6 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 	atomic.AddUint32(&c.responseCount, 1)
 	response.Ctx = ctx
 	response.Request = request
-	response.Trace = hTrace
 
 	err = response.fixCharset(c.DetectCharset, request.ResponseCharacterEncoding)
 	if err != nil {
