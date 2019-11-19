@@ -38,16 +38,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"google.golang.org/appengine/urlfetch"
-
 	"github.com/PuerkitoBio/goquery"
 	"github.com/antchfx/htmlquery"
 	"github.com/antchfx/xmlquery"
-	"github.com/kennygrant/sanitize"
-	"github.com/temoto/robotstxt"
-
 	"github.com/gocolly/colly/debug"
 	"github.com/gocolly/colly/storage"
+	"github.com/kennygrant/sanitize"
+	"github.com/temoto/robotstxt"
+	"google.golang.org/appengine/urlfetch"
 )
 
 // A CollectorOption sets an option on a Collector.
@@ -105,7 +103,8 @@ type Collector struct {
 	// without explicit charset declaration. This feature uses https://github.com/saintfish/chardet
 	DetectCharset bool
 	// RedirectHandler allows control on how a redirect will be managed
-	RedirectHandler func(req *http.Request, via []*http.Request) error
+	// use c.SetRedirectHandler to set this value
+	redirectHandler func(req *http.Request, via []*http.Request) error
 	// CheckHead performs a HEAD request before every GET to pre-validate the response
 	CheckHead         bool
 	store             storage.Storage
@@ -217,7 +216,7 @@ var envMap = map[string]func(*Collector, string){
 	},
 	"FOLLOW_REDIRECTS": func(c *Collector, val string) {
 		if !isYesString(val) {
-			c.RedirectHandler = func(req *http.Request, via []*http.Request) error {
+			c.redirectHandler = func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			}
 		}
@@ -230,7 +229,7 @@ var envMap = map[string]func(*Collector, string){
 	},
 	"MAX_DEPTH": func(c *Collector, val string) {
 		maxDepth, err := strconv.Atoi(val)
-		if err != nil {
+		if err == nil {
 			c.MaxDepth = maxDepth
 		}
 	},
@@ -415,6 +414,14 @@ func (c *Collector) Visit(URL string) error {
 		}
 	}
 	return c.scrape(URL, "GET", 1, nil, nil, nil, true)
+}
+
+// HasVisited checks if the provided URL has been visited
+func (c *Collector) HasVisited(URL string) (bool, error) {
+	h := fnv.New64a()
+	h.Write([]byte(URL))
+
+	return c.store.IsVisited(h.Sum64())
 }
 
 // Head starts a collector job by creating a HEAD request.
@@ -854,6 +861,11 @@ func (c *Collector) OnScraped(f ScrapedCallback) {
 	c.lock.Unlock()
 }
 
+// SetClient will override the previously set http.Client
+func (c *Collector) SetClient(client *http.Client) {
+	c.backend.Client = client
+}
+
 // WithTransport allows you to set a custom http.RoundTripper (transport)
 func (c *Collector) WithTransport(transport http.RoundTripper) {
 	c.backend.Client.Transport = transport
@@ -1091,6 +1103,12 @@ func (c *Collector) Limits(rules []*LimitRule) error {
 	return c.backend.Limits(rules)
 }
 
+// SetRedirectHandler instructs the Collector to allow multiple downloads of the same URL
+func (c *Collector) SetRedirectHandler(f func(req *http.Request, via []*http.Request) error) {
+	c.redirectHandler = f
+	c.backend.Client.CheckRedirect = c.checkRedirectFunc()
+}
+
 // SetCookies handles the receipt of the cookies in a reply for the given URL
 func (c *Collector) SetCookies(URL string, cookies []*http.Cookie) error {
 	if c.backend.Client.Jar == nil {
@@ -1139,7 +1157,7 @@ func (c *Collector) Clone() *Collector {
 		backend:                c.backend,
 		debugger:               c.debugger,
 		Async:                  c.Async,
-		RedirectHandler:        c.RedirectHandler,
+		redirectHandler:        c.redirectHandler,
 		errorCallbacks:         make([]ErrorCallback, 0, 8),
 		htmlCallbacks:          make([]*htmlCallbackContainer, 0, 8),
 		xmlCallbacks:           make([]*xmlCallbackContainer, 0, 8),
@@ -1158,8 +1176,8 @@ func (c *Collector) checkRedirectFunc() func(req *http.Request, via []*http.Requ
 			return fmt.Errorf("Not following redirect to %s because its not in AllowedDomains", req.URL.Host)
 		}
 
-		if c.RedirectHandler != nil {
-			return c.RedirectHandler(req, via)
+		if c.redirectHandler != nil {
+			return c.redirectHandler(req, via)
 		}
 
 		// Honor golangs default of maximum of 10 redirects
