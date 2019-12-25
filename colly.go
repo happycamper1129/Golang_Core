@@ -493,6 +493,7 @@ func (c *Collector) UnmarshalRequest(r []byte) (*Request, error) {
 	return &Request{
 		Method:    req.Method,
 		URL:       u,
+		Depth:     req.Depth,
 		Body:      bytes.NewReader(req.Body),
 		Ctx:       ctx,
 		ID:        atomic.AddUint32(&c.requestCount, 1),
@@ -502,21 +503,14 @@ func (c *Collector) UnmarshalRequest(r []byte) (*Request, error) {
 }
 
 func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, checkRevisit bool) error {
-	if err := c.requestCheck(u, method, depth, checkRevisit); err != nil {
-		return err
-	}
 	parsedURL, err := url.Parse(u)
 	if err != nil {
 		return err
 	}
-	if !c.isDomainAllowed(parsedURL.Hostname()) {
-		return ErrForbiddenDomain
+	if err := c.requestCheck(u, parsedURL, method, depth, checkRevisit); err != nil {
+		return err
 	}
-	if method != "HEAD" && !c.IgnoreRobotsTxt {
-		if err = c.checkRobots(parsedURL); err != nil {
-			return err
-		}
-	}
+
 	if hdr == nil {
 		hdr = http.Header{"User-Agent": []string{c.UserAgent}}
 	}
@@ -650,7 +644,7 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 	return err
 }
 
-func (c *Collector) requestCheck(u, method string, depth int, checkRevisit bool) error {
+func (c *Collector) requestCheck(u string, parsedURL *url.URL, method string, depth int, checkRevisit bool) error {
 	if u == "" {
 		return ErrMissingURL
 	}
@@ -665,6 +659,14 @@ func (c *Collector) requestCheck(u, method string, depth int, checkRevisit bool)
 	if len(c.URLFilters) > 0 {
 		if !isMatchingFilter(c.URLFilters, []byte(u)) {
 			return ErrNoURLFiltersMatch
+		}
+	}
+	if !c.isDomainAllowed(parsedURL.Hostname()) {
+		return ErrForbiddenDomain
+	}
+	if method != "HEAD" && !c.IgnoreRobotsTxt {
+		if err := c.checkRobots(parsedURL); err != nil {
+			return err
 		}
 	}
 	if checkRevisit && !c.AllowURLRevisit && method == "GET" {
