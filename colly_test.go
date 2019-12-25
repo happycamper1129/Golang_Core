@@ -15,10 +15,12 @@
 package colly
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"regexp"
@@ -27,7 +29,7 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 
-	"github.com/gocolly/colly/debug"
+	"github.com/gocolly/colly/v2/debug"
 )
 
 var serverIndexResponse = []byte("hello world\n")
@@ -135,6 +137,18 @@ func newTestServer() *httptest.Server {
 </body>
 </html>
 		`))
+	})
+
+	mux.HandleFunc("/large_binary", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		ww := bufio.NewWriter(w)
+		defer ww.Flush()
+		for {
+			// have to check error to detect client aborting download
+			if _, err := ww.Write([]byte{0x41}); err != nil {
+				return
+			}
+		}
 	})
 
 	return httptest.NewServer(mux)
@@ -387,6 +401,28 @@ func TestCollectorVisitWithDisallowedDomains(t *testing.T) {
 	}
 }
 
+func TestCollectorVisitResponseHeaders(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	var onResponseHeadersCalled bool
+
+	c := NewCollector()
+	c.OnResponseHeaders(func(r *Response) {
+		onResponseHeadersCalled = true
+		if r.Headers.Get("Content-Type") == "application/octet-stream" {
+			r.Request.Abort()
+		}
+	})
+	c.OnResponse(func(r *Response) {
+		t.Error("OnResponse was called")
+	})
+	c.Visit(ts.URL + "/large_binary")
+	if !onResponseHeadersCalled {
+		t.Error("OnResponseHeaders was not called")
+	}
+}
+
 func TestCollectorOnHTML(t *testing.T) {
 	ts := newTestServer()
 	defer ts.Close()
@@ -458,6 +494,57 @@ func TestCollectorURLRevisit(t *testing.T) {
 	if visitCount != 3 {
 		t.Error("URL not revisited")
 	}
+}
+
+func TestCollectorURLRevisitCheck(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	c := NewCollector()
+
+	visited, err := c.HasVisited(ts.URL)
+
+	if err != nil {
+		t.Error(err.Error())
+	}
+
+	if visited != false {
+		t.Error("Expected URL to NOT have been visited")
+	}
+
+	c.Visit(ts.URL)
+
+	visited, err = c.HasVisited(ts.URL)
+
+	if err != nil {
+		t.Error(err.Error())
+	}
+
+	if visited != true {
+		t.Error("Expected URL to have been visited")
+	}
+}
+
+// TestCollectorURLRevisitDisallowed ensures that disallowed URL is not considered visited.
+func TestCollectorURLRevisitDomainDisallowed(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	parsedURL, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewCollector(DisallowedDomains(parsedURL.Hostname()))
+	err = c.Visit(ts.URL)
+	if got, want := err, ErrForbiddenDomain; got != want {
+		t.Fatalf("wrong error on first visit: got=%v want=%v", got, want)
+	}
+	err = c.Visit(ts.URL)
+	if got, want := err, ErrForbiddenDomain; got != want {
+		t.Fatalf("wrong error on second visit: got=%v want=%v", got, want)
+	}
+
 }
 
 func TestCollectorPost(t *testing.T) {

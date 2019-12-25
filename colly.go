@@ -38,16 +38,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"google.golang.org/appengine/urlfetch"
-
 	"github.com/PuerkitoBio/goquery"
 	"github.com/antchfx/htmlquery"
 	"github.com/antchfx/xmlquery"
+	"github.com/gocolly/colly/v2/debug"
+	"github.com/gocolly/colly/v2/storage"
 	"github.com/kennygrant/sanitize"
 	"github.com/temoto/robotstxt"
-
-	"github.com/gocolly/colly/debug"
-	"github.com/gocolly/colly/storage"
+	"google.golang.org/appengine/urlfetch"
 )
 
 // A CollectorOption sets an option on a Collector.
@@ -105,30 +103,35 @@ type Collector struct {
 	// without explicit charset declaration. This feature uses https://github.com/saintfish/chardet
 	DetectCharset bool
 	// RedirectHandler allows control on how a redirect will be managed
-	RedirectHandler func(req *http.Request, via []*http.Request) error
+	// use c.SetRedirectHandler to set this value
+	redirectHandler func(req *http.Request, via []*http.Request) error
 	// CheckHead performs a HEAD request before every GET to pre-validate the response
 	CheckHead bool
 	// TraceHTTP enables capturing and reporting request performance for crawler tuning.
 	// When set to true, the Response.Trace will be filled in with an HTTPTrace object.
-	TraceHTTP         bool
-	store             storage.Storage
-	debugger          debug.Debugger
-	robotsMap         map[string]*robotstxt.RobotsData
-	htmlCallbacks     []*htmlCallbackContainer
-	xmlCallbacks      []*xmlCallbackContainer
-	requestCallbacks  []RequestCallback
-	responseCallbacks []ResponseCallback
-	errorCallbacks    []ErrorCallback
-	scrapedCallbacks  []ScrapedCallback
-	requestCount      uint32
-	responseCount     uint32
-	backend           *httpBackend
-	wg                *sync.WaitGroup
-	lock              *sync.RWMutex
+	TraceHTTP                bool
+	store                    storage.Storage
+	debugger                 debug.Debugger
+	robotsMap                map[string]*robotstxt.RobotsData
+	htmlCallbacks            []*htmlCallbackContainer
+	xmlCallbacks             []*xmlCallbackContainer
+	requestCallbacks         []RequestCallback
+	responseCallbacks        []ResponseCallback
+	responseHeadersCallbacks []ResponseHeadersCallback
+	errorCallbacks           []ErrorCallback
+	scrapedCallbacks         []ScrapedCallback
+	requestCount             uint32
+	responseCount            uint32
+	backend                  *httpBackend
+	wg                       *sync.WaitGroup
+	lock                     *sync.RWMutex
 }
 
 // RequestCallback is a type alias for OnRequest callback functions
 type RequestCallback func(*Request)
+
+// ResponseHeadersCallback is a type alias for OnResponseHeaders callback functions
+type ResponseHeadersCallback func(*Response)
 
 // ResponseCallback is a type alias for OnResponse callback functions
 type ResponseCallback func(*Response)
@@ -197,6 +200,8 @@ var (
 	ErrNoPattern = errors.New("No pattern defined in LimitRule")
 	// ErrEmptyProxyURL is the error type for empty Proxy URL list
 	ErrEmptyProxyURL = errors.New("Proxy URL list is empty")
+	// ErrAbortedAfterHeaders is the error returned when OnResponseHeaders aborts the transfer.
+	ErrAbortedAfterHeaders = errors.New("Aborted after receiving response headers")
 )
 
 var envMap = map[string]func(*Collector, string){
@@ -220,7 +225,7 @@ var envMap = map[string]func(*Collector, string){
 	},
 	"FOLLOW_REDIRECTS": func(c *Collector, val string) {
 		if !isYesString(val) {
-			c.RedirectHandler = func(req *http.Request, via []*http.Request) error {
+			c.redirectHandler = func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			}
 		}
@@ -233,7 +238,7 @@ var envMap = map[string]func(*Collector, string){
 	},
 	"MAX_DEPTH": func(c *Collector, val string) {
 		maxDepth, err := strconv.Atoi(val)
-		if err != nil {
+		if err == nil {
 			c.MaxDepth = maxDepth
 		}
 	},
@@ -383,7 +388,7 @@ func Debugger(d debug.Debugger) CollectorOption {
 // Init initializes the Collector's private variables and sets default
 // configuration for the Collector
 func (c *Collector) Init() {
-	c.UserAgent = "colly - https://github.com/gocolly/colly"
+	c.UserAgent = "colly - https://github.com/gocolly/colly/v2"
 	c.MaxDepth = 0
 	c.store = &storage.InMemoryStorage{}
 	c.store.Init()
@@ -430,6 +435,14 @@ func (c *Collector) Visit(URL string) error {
 		}
 	}
 	return c.scrape(URL, "GET", 1, nil, nil, nil, true)
+}
+
+// HasVisited checks if the provided URL has been visited
+func (c *Collector) HasVisited(URL string) (bool, error) {
+	h := fnv.New64a()
+	h.Write([]byte(URL))
+
+	return c.store.IsVisited(h.Sum64())
 }
 
 // Head starts a collector job by creating a HEAD request.
@@ -501,6 +514,7 @@ func (c *Collector) UnmarshalRequest(r []byte) (*Request, error) {
 	return &Request{
 		Method:    req.Method,
 		URL:       u,
+		Depth:     req.Depth,
 		Body:      bytes.NewReader(req.Body),
 		Ctx:       ctx,
 		ID:        atomic.AddUint32(&c.requestCount, 1),
@@ -510,21 +524,14 @@ func (c *Collector) UnmarshalRequest(r []byte) (*Request, error) {
 }
 
 func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, checkRevisit bool) error {
-	if err := c.requestCheck(u, method, depth, checkRevisit); err != nil {
-		return err
-	}
 	parsedURL, err := url.Parse(u)
 	if err != nil {
 		return err
 	}
-	if !c.isDomainAllowed(parsedURL.Hostname()) {
-		return ErrForbiddenDomain
+	if err := c.requestCheck(u, parsedURL, method, depth, checkRevisit); err != nil {
+		return err
 	}
-	if method != "HEAD" && !c.IgnoreRobotsTxt {
-		if err = c.checkRobots(parsedURL); err != nil {
-			return err
-		}
-	}
+
 	if hdr == nil {
 		hdr = http.Header{"User-Agent": []string{c.UserAgent}}
 	}
@@ -625,9 +632,13 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 		hTrace = &HTTPTrace{}
 		req = hTrace.WithTrace(req)
 	}
+	checkHeadersFunc := func(statusCode int, headers http.Header) bool {
+		c.handleOnResponseHeaders(&Response{Ctx: ctx, Request: request, StatusCode: statusCode, Headers: &headers})
+		return !request.abort
+	}
 
 	origURL := req.URL
-	response, err := c.backend.Cache(req, c.MaxBodySize, c.CacheDir)
+	response, err := c.backend.Cache(req, c.MaxBodySize, checkHeadersFunc, c.CacheDir)
 	if proxyURL, ok := req.Context().Value(ProxyURLKey).(string); ok {
 		request.ProxyURL = proxyURL
 	}
@@ -665,7 +676,7 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 	return err
 }
 
-func (c *Collector) requestCheck(u, method string, depth int, checkRevisit bool) error {
+func (c *Collector) requestCheck(u string, parsedURL *url.URL, method string, depth int, checkRevisit bool) error {
 	if u == "" {
 		return ErrMissingURL
 	}
@@ -680,6 +691,14 @@ func (c *Collector) requestCheck(u, method string, depth int, checkRevisit bool)
 	if len(c.URLFilters) > 0 {
 		if !isMatchingFilter(c.URLFilters, []byte(u)) {
 			return ErrNoURLFiltersMatch
+		}
+	}
+	if !c.isDomainAllowed(parsedURL.Hostname()) {
+		return ErrForbiddenDomain
+	}
+	if method != "HEAD" && !c.IgnoreRobotsTxt {
+		if err := c.checkRobots(parsedURL); err != nil {
+			return err
 		}
 	}
 	if checkRevisit && !c.AllowURLRevisit && method == "GET" {
@@ -782,6 +801,23 @@ func (c *Collector) OnRequest(f RequestCallback) {
 	c.lock.Unlock()
 }
 
+// OnResponseHeaders registers a function. Function will be executed on every response
+// when headers and status are already received, but body is not yet read.
+//
+// Like in OnRequest, you can call Request.Abort to abort the transfer. This might be
+// useful if, for example, you're following all hyperlinks, but want to avoid
+// downloading files.
+//
+// Be aware that using this will prevent HTTP/1.1 connection reuse, as
+// the only way to abort a download is to immediately close the connection.
+// HTTP/2 doesn't suffer from this problem, as it's possible to close
+// specific stream inside the connection.
+func (c *Collector) OnResponseHeaders(f ResponseHeadersCallback) {
+	c.lock.Lock()
+	c.responseHeadersCallbacks = append(c.responseHeadersCallbacks, f)
+	c.lock.Unlock()
+}
+
 // OnResponse registers a function. Function will be executed on every response
 func (c *Collector) OnResponse(f ResponseCallback) {
 	c.lock.Lock()
@@ -874,6 +910,11 @@ func (c *Collector) OnScraped(f ScrapedCallback) {
 	}
 	c.scrapedCallbacks = append(c.scrapedCallbacks, f)
 	c.lock.Unlock()
+}
+
+// SetClient will override the previously set http.Client
+func (c *Collector) SetClient(client *http.Client) {
+	c.backend.Client = client
 }
 
 // WithTransport allows you to set a custom http.RoundTripper (transport)
@@ -969,6 +1010,18 @@ func (c *Collector) handleOnResponse(r *Response) {
 		}))
 	}
 	for _, f := range c.responseCallbacks {
+		f(r)
+	}
+}
+
+func (c *Collector) handleOnResponseHeaders(r *Response) {
+	if c.debugger != nil {
+		c.debugger.Event(createEvent("responseHeaders", r.Request.ID, c.ID, map[string]string{
+			"url":    r.Request.URL.String(),
+			"status": http.StatusText(r.StatusCode),
+		}))
+	}
+	for _, f := range c.responseHeadersCallbacks {
 		f(r)
 	}
 }
@@ -1113,6 +1166,12 @@ func (c *Collector) Limits(rules []*LimitRule) error {
 	return c.backend.Limits(rules)
 }
 
+// SetRedirectHandler instructs the Collector to allow multiple downloads of the same URL
+func (c *Collector) SetRedirectHandler(f func(req *http.Request, via []*http.Request) error) {
+	c.redirectHandler = f
+	c.backend.Client.CheckRedirect = c.checkRedirectFunc()
+}
+
 // SetCookies handles the receipt of the cookies in a reply for the given URL
 func (c *Collector) SetCookies(URL string, cookies []*http.Cookie) error {
 	if c.backend.Client.Jar == nil {
@@ -1162,7 +1221,7 @@ func (c *Collector) Clone() *Collector {
 		backend:                c.backend,
 		debugger:               c.debugger,
 		Async:                  c.Async,
-		RedirectHandler:        c.RedirectHandler,
+		redirectHandler:        c.redirectHandler,
 		errorCallbacks:         make([]ErrorCallback, 0, 8),
 		htmlCallbacks:          make([]*htmlCallbackContainer, 0, 8),
 		xmlCallbacks:           make([]*xmlCallbackContainer, 0, 8),
@@ -1181,8 +1240,8 @@ func (c *Collector) checkRedirectFunc() func(req *http.Request, via []*http.Requ
 			return fmt.Errorf("Not following redirect to %s because its not in AllowedDomains", req.URL.Host)
 		}
 
-		if c.RedirectHandler != nil {
-			return c.RedirectHandler(req, via)
+		if c.redirectHandler != nil {
+			return c.redirectHandler(req, via)
 		}
 
 		// Honor golangs default of maximum of 10 redirects
