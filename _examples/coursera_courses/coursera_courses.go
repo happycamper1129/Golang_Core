@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/gocolly/colly/v2"
+	"github.com/gocolly/colly"
 )
 
 // Course stores information about a coursera course

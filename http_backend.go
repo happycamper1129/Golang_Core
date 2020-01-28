@@ -49,7 +49,7 @@ type httpBackend struct {
 type LimitRule struct {
 	// DomainRegexp is a regular expression to match against domains
 	DomainRegexp string
-	// DomainGlob is a glob pattern to match against domains
+	// DomainRegexp is a glob pattern to match against domains
 	DomainGlob string
 	// Delay is the duration to wait before creating a new request to the matching domains
 	Delay time.Duration
@@ -192,7 +192,7 @@ func (h *httpBackend) Do(request *http.Request, bodySize int) (*Response, error)
 		bodyReader = io.LimitReader(bodyReader, int64(bodySize))
 	}
 	contentEncoding := strings.ToLower(res.Header.Get("Content-Encoding"))
-	if !res.Uncompressed && (strings.Contains(contentEncoding, "gzip") || (contentEncoding == "" && strings.Contains(strings.ToLower(res.Header.Get("Content-Type")), "gzip")) || strings.HasSuffix(strings.ToLower(res.Request.URL.Path), ".xml.gz")) {
+	if !res.Uncompressed && (strings.Contains(contentEncoding, "gzip") || (contentEncoding == "" && strings.Contains(strings.ToLower((res.Header.Get("Content-Type"))), "gzip"))) {
 		bodyReader, err = gzip.NewReader(bodyReader)
 		if err != nil {
 			return nil, err

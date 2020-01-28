@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"reflect"
 	"regexp"
@@ -28,7 +27,7 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 
-	"github.com/gocolly/colly/v2/debug"
+	"github.com/gocolly/colly/debug"
 )
 
 var serverIndexResponse = []byte("hello world\n")
@@ -461,57 +460,6 @@ func TestCollectorURLRevisit(t *testing.T) {
 	}
 }
 
-func TestCollectorURLRevisitCheck(t *testing.T) {
-	ts := newTestServer()
-	defer ts.Close()
-
-	c := NewCollector()
-
-	visited, err := c.HasVisited(ts.URL)
-
-	if err != nil {
-		t.Error(err.Error())
-	}
-
-	if visited != false {
-		t.Error("Expected URL to NOT have been visited")
-	}
-
-	c.Visit(ts.URL)
-
-	visited, err = c.HasVisited(ts.URL)
-
-	if err != nil {
-		t.Error(err.Error())
-	}
-
-	if visited != true {
-		t.Error("Expected URL to have been visited")
-	}
-}
-
-// TestCollectorURLRevisitDisallowed ensures that disallowed URL is not considered visited.
-func TestCollectorURLRevisitDomainDisallowed(t *testing.T) {
-	ts := newTestServer()
-	defer ts.Close()
-
-	parsedURL, err := url.Parse(ts.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	c := NewCollector(DisallowedDomains(parsedURL.Hostname()))
-	err = c.Visit(ts.URL)
-	if got, want := err, ErrForbiddenDomain; got != want {
-		t.Fatalf("wrong error on first visit: got=%v want=%v", got, want)
-	}
-	err = c.Visit(ts.URL)
-	if got, want := err, ErrForbiddenDomain; got != want {
-		t.Fatalf("wrong error on second visit: got=%v want=%v", got, want)
-	}
-
-}
-
 func TestCollectorPost(t *testing.T) {
 	ts := newTestServer()
 	defer ts.Close()
@@ -810,6 +758,23 @@ func TestCollectorOnXML(t *testing.T) {
 
 	if paragraphCallbackCount != 2 {
 		t.Error("Failed to find all <p> tags")
+	}
+}
+
+func TestCollectorVisitWithTrace(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	c := NewCollector(AllowedDomains("localhost", "127.0.0.1", "::1"), TraceHTTP())
+	c.OnResponse(func(resp *Response) {
+		if resp.Trace == nil {
+			t.Error("Failed to initialize trace")
+		}
+	})
+
+	err := c.Visit(ts.URL)
+	if err != nil {
+		t.Errorf("Failed to visit url %s", ts.URL)
 	}
 }
 
