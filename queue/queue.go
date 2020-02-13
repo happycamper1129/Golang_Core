@@ -30,7 +30,8 @@ type Queue struct {
 	Threads           int
 	storage           Storage
 	activeThreadCount int32
-	requestsOut       chan *colly.Request
+	threadChans       []chan bool
+	lock              *sync.Mutex
 }
 
 // InMemoryQueueStorage is the default implementation of the Storage interface.
@@ -62,7 +63,8 @@ func New(threads int, s Storage) (*Queue, error) {
 	return &Queue{
 		Threads:     threads,
 		storage:     s,
-		requestsOut: make(chan *colly.Request),
+		lock:        &sync.Mutex{},
+		threadChans: make([]chan bool, 0, threads),
 	}, nil
 }
 
@@ -95,7 +97,16 @@ func (q *Queue) AddRequest(r *colly.Request) error {
 	if err != nil {
 		return err
 	}
-	return q.storage.AddRequest(d)
+	if err := q.storage.AddRequest(d); err != nil {
+		return err
+	}
+	q.lock.Lock()
+	for _, c := range q.threadChans {
+		c <- !stop
+	}
+	q.threadChans = make([]chan bool, 0, q.Threads)
+	q.lock.Unlock()
+	return nil
 }
 
 // Size returns the size of the queue
@@ -109,48 +120,52 @@ func (q *Queue) Run(c *colly.Collector) error {
 	wg := &sync.WaitGroup{}
 	for i := 0; i < q.Threads; i++ {
 		wg.Add(1)
-		go func() {
+		go func(c *colly.Collector, wg *sync.WaitGroup) {
 			defer wg.Done()
-			atomic.AddInt32(&q.activeThreadCount, 1)
-			for r := range q.requestsOut {
-				r.Do()
-			}
-			atomic.AddInt32(&q.activeThreadCount, -1)
-		}()
-	}
-
-	wg.Add(1)
-	go func(c *colly.Collector, s Storage) {
-		defer wg.Done()
-		for {
-			if q.IsEmpty() {
-				if q.activeThreadCount == 0 {
-					q.finish()
-					break
+			for {
+				if q.IsEmpty() {
+					if q.activeThreadCount == 0 {
+						break
+					}
+					ch := make(chan bool)
+					q.lock.Lock()
+					q.threadChans = append(q.threadChans, ch)
+					q.lock.Unlock()
+					action := <-ch
+					if action == stop && q.IsEmpty() {
+						break
+					}
 				}
-				continue
+				q.lock.Lock()
+				atomic.AddInt32(&q.activeThreadCount, 1)
+				q.lock.Unlock()
+				rb, err := q.storage.GetRequest()
+				if err != nil || rb == nil {
+					q.finish()
+					continue
+				}
+				r, err := c.UnmarshalRequest(rb)
+				if err != nil || r == nil {
+					q.finish()
+					continue
+				}
+				r.Do()
+				q.finish()
 			}
-			rb, err := s.GetRequest()
-			if err != nil || rb == nil {
-				//q.finish()
-				break
-			}
-			t := make([]byte, len(rb))
-			copy(t, rb)
-			r, err := c.UnmarshalRequest(t[:])
-			if err != nil || r == nil {
-				continue
-			}
-			q.requestsOut <- r
-		}
-	}(c, q.storage)
-
+		}(c, wg)
+	}
 	wg.Wait()
 	return nil
 }
 
 func (q *Queue) finish() {
-	close(q.requestsOut)
+	q.lock.Lock()
+	q.activeThreadCount--
+	for _, c := range q.threadChans {
+		c <- stop
+	}
+	q.threadChans = make([]chan bool, 0, q.Threads)
+	q.lock.Unlock()
 }
 
 // Init implements Storage.Init() function
