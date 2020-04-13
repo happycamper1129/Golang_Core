@@ -16,7 +16,6 @@
 package colly
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -538,7 +537,7 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 	if err != nil {
 		return err
 	}
-	if err := c.requestCheck(u, parsedURL, method, requestData, depth, checkRevisit); err != nil {
+	if err := c.requestCheck(u, parsedURL, method, depth, checkRevisit); err != nil {
 		return err
 	}
 
@@ -686,7 +685,7 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 	return err
 }
 
-func (c *Collector) requestCheck(u string, parsedURL *url.URL, method string, requestData io.Reader, depth int, checkRevisit bool) error {
+func (c *Collector) requestCheck(u string, parsedURL *url.URL, method string, depth int, checkRevisit bool) error {
 	if u == "" {
 		return ErrMissingURL
 	}
@@ -711,20 +710,10 @@ func (c *Collector) requestCheck(u string, parsedURL *url.URL, method string, re
 			return err
 		}
 	}
-	if checkRevisit && !c.AllowURLRevisit {
+	if checkRevisit && !c.AllowURLRevisit && method == "GET" {
 		h := fnv.New64a()
 		h.Write([]byte(u))
-
-		var uHash uint64
-		if method == "GET" {
-			uHash = h.Sum64()
-		} else if requestData != nil {
-			h.Write(bufio.NewScanner(requestData).Bytes())
-			uHash = h.Sum64()
-		} else {
-			return nil
-		}
-
+		uHash := h.Sum64()
 		visited, err := c.store.IsVisited(uHash)
 		if err != nil {
 			return err
