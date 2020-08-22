@@ -18,18 +18,11 @@ type Course struct {
 	URL         string
 	Language    string
 	Commitment  string
+	HowToPass   string
 	Rating      string
 }
 
 func main() {
-	fName := "courses.json"
-	file, err := os.Create(fName)
-	if err != nil {
-		log.Fatalf("Cannot create file %q: %s\n", fName, err)
-		return
-	}
-	defer file.Close()
-
 	// Instantiate default collector
 	c := colly.NewCollector(
 		// Visit only domains: coursera.org, www.coursera.org
@@ -45,7 +38,7 @@ func main() {
 
 	courses := make([]Course, 0, 200)
 
-	// On every <a> element which has "href" attribute call callback
+	// On every a element which has href attribute call callback
 	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
 		// If attribute class is this long string return from callback
 		// As this a is irrelevant
@@ -66,8 +59,8 @@ func main() {
 		log.Println("visiting", r.URL.String())
 	})
 
-	// On every <a> element with collection-product-card class call callback
-	c.OnHTML(`a.collection-product-card`, func(e *colly.HTMLElement) {
+	// On every a HTML element which has name attribute call callback
+	c.OnHTML(`a[name]`, func(e *colly.HTMLElement) {
 		// Activate detailCollector if the link contains "coursera.org/learn"
 		courseURL := e.Request.AbsoluteURL(e.Attr("href"))
 		if strings.Index(courseURL, "coursera.org/learn") != -1 {
@@ -78,7 +71,7 @@ func main() {
 	// Extract details of the course
 	detailCollector.OnHTML(`div[id=rendered-content]`, func(e *colly.HTMLElement) {
 		log.Println("Course found", e.Request.URL)
-		title := e.ChildText(".banner-title")
+		title := e.ChildText(".course-title")
 		if title == "" {
 			log.Println("No title found", e.Request.URL)
 		}
@@ -86,23 +79,22 @@ func main() {
 			Title:       title,
 			URL:         e.Request.URL.String(),
 			Description: e.ChildText("div.content"),
-			Creator:     e.ChildText("li.banner-instructor-info > a > div > div > span"),
-			Rating:      e.ChildText("span.number-rating"),
+			Creator:     e.ChildText("div.creator-names > span"),
 		}
-		// Iterate over div components and add details to course
-		e.ForEach(".AboutCourse .ProductGlance > div", func(_ int, el *colly.HTMLElement) {
-			svgTitle := strings.Split(el.ChildText("div:nth-child(1) svg title"), " ")
-			lastWord := svgTitle[len(svgTitle)-1]
-			switch lastWord {
-			// svg Title: Available Langauges
-			case "languages":
-				course.Language = el.ChildText("div:nth-child(2) > div:nth-child(1)")
-			// svg Title: Mixed/Beginner/Intermediate/Advanced Level
+		// Iterate over rows of the table which contains different information
+		// about the course
+		e.ForEach("table.basic-info-table tr", func(_ int, el *colly.HTMLElement) {
+			switch el.ChildText("td:first-child") {
+			case "Language":
+				course.Language = el.ChildText("td:nth-child(2)")
 			case "Level":
-				course.Level = el.ChildText("div:nth-child(2) > div:nth-child(1)")
-			// svg Title: Hours to complete
-			case "complete":
-				course.Commitment = el.ChildText("div:nth-child(2) > div:nth-child(1)")
+				course.Level = el.ChildText("td:nth-child(2)")
+			case "Commitment":
+				course.Commitment = el.ChildText("td:nth-child(2)")
+			case "How To Pass":
+				course.HowToPass = el.ChildText("td:nth-child(2)")
+			case "User Ratings":
+				course.Rating = el.ChildText("td:nth-child(2) div:nth-of-type(2)")
 			}
 		})
 		courses = append(courses, course)
@@ -111,7 +103,7 @@ func main() {
 	// Start scraping on http://coursera.com/browse
 	c.Visit("https://coursera.org/browse")
 
-	enc := json.NewEncoder(file)
+	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 
 	// Dump json to the standard output
