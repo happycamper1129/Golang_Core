@@ -1012,11 +1012,9 @@ func (c *Collector) SetProxyFunc(p ProxyFunc) {
 	t, ok := c.backend.Client.Transport.(*http.Transport)
 	if c.backend.Client.Transport != nil && ok {
 		t.Proxy = p
-		t.DisableKeepAlives = true
 	} else {
 		c.backend.Client.Transport = &http.Transport{
-			Proxy:             p,
-			DisableKeepAlives: true,
+			Proxy: p,
 		}
 	}
 }
