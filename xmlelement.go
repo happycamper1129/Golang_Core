@@ -15,6 +15,7 @@
 package colly
 
 import (
+	"encoding/xml"
 	"strings"
 
 	"github.com/antchfx/htmlquery"
@@ -75,7 +76,7 @@ func (h *XMLElement) Attr(k string) string {
 			}
 		}
 	} else {
-		for _, a := range h.attributes.([]xmlquery.Attr) {
+		for _, a := range h.attributes.([]xml.Attr) {
 			if a.Name.Local == k {
 				return a.Value
 			}

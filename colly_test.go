@@ -66,17 +66,6 @@ func newTestServer() *httptest.Server {
 		`))
 	})
 
-	mux.HandleFunc("/xml", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/xml")
-		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
-<page>
-	<title>Test Page</title>
-	<paragraph type="description">This is a test page</paragraph>
-	<paragraph type="description">This is a test paragraph</paragraph>
-</page>
-		`))
-	})
-
 	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" {
 			w.Header().Set("Content-Type", "text/html")
@@ -979,6 +968,75 @@ func TestEnvSettings(t *testing.T) {
 	}
 }
 
+func TestUserAgent(t *testing.T) {
+	const exampleUserAgent1 = "Example/1.0"
+	const exampleUserAgent2 = "Example/2.0"
+	const defaultUserAgent = "colly - https://github.com/gocolly/colly/v2"
+
+	ts := newTestServer()
+	defer ts.Close()
+
+	var receivedUserAgent string
+
+	func() {
+		c := NewCollector()
+		c.OnResponse(func(resp *Response) {
+			receivedUserAgent = string(resp.Body)
+		})
+		c.Visit(ts.URL + "/user_agent")
+		if got, want := receivedUserAgent, defaultUserAgent; got != want {
+			t.Errorf("mismatched User-Agent: got=%q want=%q", got, want)
+		}
+	}()
+	func() {
+		c := NewCollector(UserAgent(exampleUserAgent1))
+		c.OnResponse(func(resp *Response) {
+			receivedUserAgent = string(resp.Body)
+		})
+		c.Visit(ts.URL + "/user_agent")
+		if got, want := receivedUserAgent, exampleUserAgent1; got != want {
+			t.Errorf("mismatched User-Agent: got=%q want=%q", got, want)
+		}
+	}()
+	func() {
+		c := NewCollector(UserAgent(exampleUserAgent1))
+		c.OnResponse(func(resp *Response) {
+			receivedUserAgent = string(resp.Body)
+		})
+
+		c.Request("GET", ts.URL+"/user_agent", nil, nil, nil)
+		if got, want := receivedUserAgent, exampleUserAgent1; got != want {
+			t.Errorf("mismatched User-Agent (nil hdr): got=%q want=%q", got, want)
+		}
+	}()
+	func() {
+		c := NewCollector(UserAgent(exampleUserAgent1))
+		c.OnResponse(func(resp *Response) {
+			receivedUserAgent = string(resp.Body)
+		})
+		hdr := http.Header{}
+		hdr.Set("User-Agent", "")
+
+		c.Request("GET", ts.URL+"/user_agent", nil, nil, hdr)
+		if got, want := receivedUserAgent, ""; got != want {
+			t.Errorf("mismatched User-Agent (hdr with empty UA): got=%q want=%q", got, want)
+		}
+	}()
+	func() {
+		c := NewCollector(UserAgent(exampleUserAgent1))
+		c.OnResponse(func(resp *Response) {
+			receivedUserAgent = string(resp.Body)
+		})
+		hdr := http.Header{}
+		hdr.Set("User-Agent", exampleUserAgent2)
+
+		c.Request("GET", ts.URL+"/user_agent", nil, nil, hdr)
+		if got, want := receivedUserAgent, exampleUserAgent2; got != want {
+			t.Errorf("mismatched User-Agent (hdr with UA): got=%q want=%q", got, want)
+		}
+	}()
+}
+
 func TestParseHTTPErrorResponse(t *testing.T) {
 	contentCount := 0
 	ts := newTestServer()
@@ -1049,7 +1107,7 @@ func TestHTMLElement(t *testing.T) {
 	}
 }
 
-func TestCollectorOnXMLWithHtml(t *testing.T) {
+func TestCollectorOnXML(t *testing.T) {
 	ts := newTestServer()
 	defer ts.Close()
 
@@ -1090,50 +1148,6 @@ func TestCollectorOnXMLWithHtml(t *testing.T) {
 
 	if paragraphCallbackCount != 2 {
 		t.Error("Failed to find all <p> tags")
-	}
-}
-
-func TestCollectorOnXMLWithXML(t *testing.T) {
-	ts := newTestServer()
-	defer ts.Close()
-
-	c := NewCollector()
-
-	titleCallbackCalled := false
-	paragraphCallbackCount := 0
-
-	c.OnXML("//page/title", func(e *XMLElement) {
-		titleCallbackCalled = true
-		if e.Text != "Test Page" {
-			t.Error("Title element text does not match, got", e.Text)
-		}
-	})
-
-	c.OnXML("//page/paragraph", func(e *XMLElement) {
-		paragraphCallbackCount++
-		if e.Attr("type") != "description" {
-			t.Error("Failed to get paragraph's type attribute")
-		}
-	})
-
-	c.OnXML("/page", func(e *XMLElement) {
-		if e.ChildAttr("paragraph", "type") != "description" {
-			t.Error("Invalid type value")
-		}
-		classes := e.ChildAttrs("paragraph", "type")
-		if len(classes) != 2 {
-			t.Error("Invalid type values")
-		}
-	})
-
-	c.Visit(ts.URL + "/xml")
-
-	if !titleCallbackCalled {
-		t.Error("Failed to call OnXML callback for <title> tag")
-	}
-
-	if paragraphCallbackCount != 2 {
-		t.Error("Failed to find all <paragraph> tags")
 	}
 }
 
