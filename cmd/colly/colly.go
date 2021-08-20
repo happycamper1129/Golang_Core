@@ -48,19 +48,19 @@ var htmlCallbackTemplate = `
 `
 
 var requestCallbackTemplate = `
-	c.OnRequest(func(r *colly.Request) {
+	c.OnRequest("element-selector", func(r *colly.Request) {
 		log.Println("Visiting", r.URL)
 	})
 `
 
 var responseCallbackTemplate = `
-	c.OnResponse(func(r *colly.Response) {
+	c.OnResponse("element-selector", func(r *colly.Response) {
 		log.Println("Visited", r.Request.URL, r.StatusCode)
 	})
 `
 
 var errorCallbackTemplate = `
-	c.OnError(func(r *colly.Response, err error) {
+	c.OnError("element-selector", func(r *colly.Response, err error) {
 		log.Printf("Error on %s: %s", r.Request.URL, err)
 	})
 `
