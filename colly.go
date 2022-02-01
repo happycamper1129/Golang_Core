@@ -260,8 +260,6 @@ var envMap = map[string]func(*Collector, string){
 	},
 }
 
-var urlParser = whatwgUrl.NewParser(whatwgUrl.WithPercentEncodeSinglePercentSign())
-
 // NewCollector creates a new Collector instance with default configuration
 func NewCollector(options ...CollectorOption) *Collector {
 	c := &Collector{}
@@ -382,7 +380,11 @@ func ID(id uint32) CollectorOption {
 // Async turns on asynchronous network requests.
 func Async(a ...bool) CollectorOption {
 	return func(c *Collector) {
-		c.Async = true
+		if len(a) > 0 {
+			c.Async = a[0]
+		} else {
+			c.Async = true
+		}
 	}
 }
 
@@ -552,7 +554,7 @@ func (c *Collector) UnmarshalRequest(r []byte) (*Request, error) {
 }
 
 func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, checkRevisit bool) error {
-	parsedWhatwgURL, err := urlParser.Parse(u)
+	parsedWhatwgURL, err := whatwgUrl.Parse(u)
 	if err != nil {
 		return err
 	}
@@ -720,18 +722,8 @@ func (c *Collector) requestCheck(u string, parsedURL *url.URL, method string, re
 	if c.MaxDepth > 0 && c.MaxDepth < depth {
 		return ErrMaxDepth
 	}
-	if len(c.DisallowedURLFilters) > 0 {
-		if isMatchingFilter(c.DisallowedURLFilters, []byte(u)) {
-			return ErrForbiddenURL
-		}
-	}
-	if len(c.URLFilters) > 0 {
-		if !isMatchingFilter(c.URLFilters, []byte(u)) {
-			return ErrNoURLFiltersMatch
-		}
-	}
-	if !c.isDomainAllowed(parsedURL.Hostname()) {
-		return ErrForbiddenDomain
+	if err := c.checkFilters(u, parsedURL.Hostname()); err != nil {
+		return err
 	}
 	if method != "HEAD" && !c.IgnoreRobotsTxt {
 		if err := c.checkRobots(parsedURL); err != nil {
@@ -760,6 +752,23 @@ func (c *Collector) requestCheck(u string, parsedURL *url.URL, method string, re
 			return ErrAlreadyVisited
 		}
 		return c.store.Visited(uHash)
+	}
+	return nil
+}
+
+func (c *Collector) checkFilters(URL, domain string) error {
+	if len(c.DisallowedURLFilters) > 0 {
+		if isMatchingFilter(c.DisallowedURLFilters, []byte(URL)) {
+			return ErrForbiddenURL
+		}
+	}
+	if len(c.URLFilters) > 0 {
+		if !isMatchingFilter(c.URLFilters, []byte(URL)) {
+			return ErrNoURLFiltersMatch
+		}
+	}
+	if !c.isDomainAllowed(domain) {
+		return ErrForbiddenDomain
 	}
 	return nil
 }
@@ -1084,7 +1093,7 @@ func (c *Collector) handleOnHTML(resp *Response) error {
 		return err
 	}
 	if href, found := doc.Find("base[href]").Attr("href"); found {
-		u, err := urlParser.ParseRef(resp.Request.URL.String(), href)
+		u, err := whatwgUrl.ParseRef(resp.Request.URL.String(), href)
 		if err == nil {
 			baseURL, err := url.Parse(u.Href(false))
 			if err == nil {
@@ -1296,10 +1305,9 @@ func (c *Collector) Clone() *Collector {
 
 func (c *Collector) checkRedirectFunc() func(req *http.Request, via []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
-		if !c.isDomainAllowed(req.URL.Hostname()) {
-			return fmt.Errorf("Not following redirect to %s because its not in AllowedDomains", req.URL.Host)
+		if err := c.checkFilters(req.URL.String(), req.URL.Hostname()); err != nil {
+			return fmt.Errorf("Not following redirect to %q: %w", req.URL, err)
 		}
-
 		if c.redirectHandler != nil {
 			return c.redirectHandler(req, via)
 		}

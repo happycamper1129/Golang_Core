@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -195,10 +196,6 @@ y">link</a>
 </body>
 </html>
 		`))
-	})
-
-	mux.HandleFunc("/100%25", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("100 percent"))
 	})
 
 	mux.HandleFunc("/large_binary", func(w http.ResponseWriter, r *http.Request) {
@@ -838,6 +835,23 @@ func TestRedirect(t *testing.T) {
 	c.Visit(ts.URL + "/redirect")
 }
 
+func TestRedirectWithDisallowedURLs(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	c := NewCollector()
+	c.DisallowedURLFilters = []*regexp.Regexp{regexp.MustCompile(ts.URL + "/redirected/test")}
+	c.OnHTML("a[href]", func(e *HTMLElement) {
+		u := e.Request.AbsoluteURL(e.Attr("href"))
+		err := c.Visit(u)
+		if !errors.Is(err, ErrForbiddenURL) {
+			t.Error("URL should have been forbidden: " + u)
+		}
+	})
+
+	c.Visit(ts.URL + "/redirect")
+}
+
 func TestBaseTag(t *testing.T) {
 	ts := newTestServer()
 	defer ts.Close()
@@ -915,39 +929,6 @@ func TestTabsAndNewlines(t *testing.T) {
 
 	if !reflect.DeepEqual(visited, expected) {
 		t.Errorf("visited=%v expected=%v", visited, expected)
-	}
-}
-
-func TestLonePercent(t *testing.T) {
-	ts := newTestServer()
-	defer ts.Close()
-
-	var visitedPath string
-
-	c := NewCollector()
-	c.OnResponse(func(res *Response) {
-		visitedPath = res.Request.URL.RequestURI()
-	})
-	if err := c.Visit(ts.URL + "/100%"); err != nil {
-		t.Errorf("visit failed: %v", err)
-	}
-	// Automatic encoding is not really correct: browsers
-	// would send bare percent here. However, Go net/http
-	// cannot send such requests due to
-	// https://github.com/golang/go/issues/29808. So we have two
-	// alternatives really: return an error when attempting
-	// to fetch such URLs, or at least try the encoded variant.
-	// This test checks that the latter is attempted.
-	if got, want := visitedPath, "/100%25"; got != want {
-		t.Errorf("got=%q want=%q", got, want)
-	}
-	// invalid URL escape in query component is not a problem,
-	// but check it anyway
-	if err := c.Visit(ts.URL + "/?a=100%zz"); err != nil {
-		t.Errorf("visit failed: %v", err)
-	}
-	if got, want := visitedPath, "/?a=100%zz"; got != want {
-		t.Errorf("got=%q want=%q", got, want)
 	}
 }
 
