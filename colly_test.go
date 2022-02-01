@@ -101,7 +101,11 @@ func newTestServer() *httptest.Server {
 	})
 
 	mux.Handle("/redirect", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/redirected/", http.StatusSeeOther)
+		destination := "/redirected/"
+		if d := r.URL.Query().Get("d"); d != "" {
+			destination = d
+		}
+		http.Redirect(w, r, destination, http.StatusSeeOther)
 
 	}))
 
@@ -206,6 +210,10 @@ y">link</a>
 </body>
 </html>
 		`))
+	})
+
+	mux.HandleFunc("/100%25", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("100 percent"))
 	})
 
 	mux.HandleFunc("/large_binary", func(w http.ResponseWriter, r *http.Request) {
@@ -670,6 +678,38 @@ func TestCollectorURLRevisitCheck(t *testing.T) {
 	if visited != true {
 		t.Error("Expected URL to have been visited")
 	}
+
+	errorTestCases := []struct {
+		Path             string
+		DestinationError string
+	}{
+		{"/", "/"},
+		{"/redirect?d=/", "/"},
+		// now that /redirect?d=/ itself is recorded as visited,
+		// it's now returned in error
+		{"/redirect?d=/", "/redirect?d=/"},
+		{"/redirect?d=/redirect%3Fd%3D/", "/redirect?d=/"},
+		{"/redirect?d=/redirect%3Fd%3D/", "/redirect?d=/redirect%3Fd%3D/"},
+		{"/redirect?d=/redirect%3Fd%3D/&foo=bar", "/redirect?d=/"},
+	}
+
+	for i, testCase := range errorTestCases {
+		err := c.Visit(ts.URL + testCase.Path)
+		if testCase.DestinationError == "" {
+			if err != nil {
+				t.Errorf("got unexpected error in test %d: %q", i, err)
+			}
+		} else {
+			var ave *AlreadyVisitedError
+			if !errors.As(err, &ave) {
+				t.Errorf("err=%q returned when trying to revisit, expected AlreadyVisitedError", err)
+			} else {
+				if got, want := ave.Destination.String(), ts.URL+testCase.DestinationError; got != want {
+					t.Errorf("wrong destination in AlreadyVisitedError in test %d, got=%q want=%q", i, got, want)
+				}
+			}
+		}
+	}
 }
 
 func TestCollectorPostURLRevisitCheck(t *testing.T) {
@@ -939,6 +979,39 @@ func TestTabsAndNewlines(t *testing.T) {
 
 	if !reflect.DeepEqual(visited, expected) {
 		t.Errorf("visited=%v expected=%v", visited, expected)
+	}
+}
+
+func TestLonePercent(t *testing.T) {
+	ts := newTestServer()
+	defer ts.Close()
+
+	var visitedPath string
+
+	c := NewCollector()
+	c.OnResponse(func(res *Response) {
+		visitedPath = res.Request.URL.RequestURI()
+	})
+	if err := c.Visit(ts.URL + "/100%"); err != nil {
+		t.Errorf("visit failed: %v", err)
+	}
+	// Automatic encoding is not really correct: browsers
+	// would send bare percent here. However, Go net/http
+	// cannot send such requests due to
+	// https://github.com/golang/go/issues/29808. So we have two
+	// alternatives really: return an error when attempting
+	// to fetch such URLs, or at least try the encoded variant.
+	// This test checks that the latter is attempted.
+	if got, want := visitedPath, "/100%25"; got != want {
+		t.Errorf("got=%q want=%q", got, want)
+	}
+	// invalid URL escape in query component is not a problem,
+	// but check it anyway
+	if err := c.Visit(ts.URL + "/?a=100%zz"); err != nil {
+		t.Errorf("visit failed: %v", err)
+	}
+	if got, want := visitedPath, "/?a=100%zz"; got != want {
+		t.Errorf("got=%q want=%q", got, want)
 	}
 }
 

@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/cookiejar"
@@ -158,6 +157,26 @@ type ScrapedCallback func(*Response)
 // ProxyFunc is a type alias for proxy setter functions.
 type ProxyFunc func(*http.Request) (*url.URL, error)
 
+// AlreadyVisitedError is the error type for already visited URLs.
+//
+// It's returned synchronously by Visit when the URL passed to Visit
+// is already visited.
+//
+// When already visited URL is encountered after following
+// redirects, this error appears in OnError callback, and if Async
+// mode is not enabled, is also returned by Visit.
+type AlreadyVisitedError struct {
+	// Destination is the URL that was attempted to be visited.
+	// It might not match the URL passed to Visit if redirect
+	// was followed.
+	Destination *url.URL
+}
+
+// Error implements error interface.
+func (e *AlreadyVisitedError) Error() string {
+	return fmt.Sprintf("%q already visited", e.Destination)
+}
+
 type htmlCallbackContainer struct {
 	Selector string
 	Function HTMLCallback
@@ -197,8 +216,6 @@ var (
 	// ErrNoURLFiltersMatch is the error thrown if visiting
 	// a URL which is not allowed by URLFilters
 	ErrNoURLFiltersMatch = errors.New("No URLFilters match")
-	// ErrAlreadyVisited is the error type for already visited URLs
-	ErrAlreadyVisited = errors.New("URL already visited")
 	// ErrRobotsTxtBlocked is the error type for robots.txt errors
 	ErrRobotsTxtBlocked = errors.New("URL blocked by robots.txt")
 	// ErrNoCookieJar is the error type for missing cookie jar
@@ -261,6 +278,8 @@ var envMap = map[string]func(*Collector, string){
 		c.UserAgent = val
 	},
 }
+
+var urlParser = whatwgUrl.NewParser(whatwgUrl.WithPercentEncodeSinglePercentSign())
 
 // NewCollector creates a new Collector instance with default configuration
 func NewCollector(options ...CollectorOption) *Collector {
@@ -568,7 +587,7 @@ func (c *Collector) UnmarshalRequest(r []byte) (*Request, error) {
 }
 
 func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, checkRevisit bool) error {
-	parsedWhatwgURL, err := whatwgUrl.Parse(u)
+	parsedWhatwgURL, err := urlParser.Parse(u)
 	if err != nil {
 		return err
 	}
@@ -576,10 +595,6 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 	if err != nil {
 		return err
 	}
-	if err := c.requestCheck(u, parsedURL, method, requestData, depth, checkRevisit); err != nil {
-		return err
-	}
-
 	if hdr == nil {
 		hdr = http.Header{}
 		if c.Headers != nil {
@@ -593,30 +608,22 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 	if _, ok := hdr["User-Agent"]; !ok {
 		hdr.Set("User-Agent", c.UserAgent)
 	}
-	rc, ok := requestData.(io.ReadCloser)
-	if !ok && requestData != nil {
-		rc = ioutil.NopCloser(requestData)
+	req, err := http.NewRequest(method, parsedURL.String(), requestData)
+	if err != nil {
+		return err
 	}
+	req.Header = hdr
 	// The Go HTTP API ignores "Host" in the headers, preferring the client
 	// to use the Host field on Request.
-	host := parsedURL.Host
 	if hostHeader := hdr.Get("Host"); hostHeader != "" {
-		host = hostHeader
-	}
-	req := &http.Request{
-		Method:     method,
-		URL:        parsedURL,
-		Proto:      "HTTP/1.1",
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     hdr,
-		Body:       rc,
-		Host:       host,
+		req.Host = hostHeader
 	}
 	// note: once 1.13 is minimum supported Go version,
 	// replace this with http.NewRequestWithContext
 	req = req.WithContext(c.Context)
-	setRequestBody(req, requestData)
+	if err := c.requestCheck(parsedURL, method, req.GetBody, depth, checkRevisit); err != nil {
+		return err
+	}
 	u = parsedURL.String()
 	c.wg.Add(1)
 	if c.Async {
@@ -624,38 +631,6 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 		return nil
 	}
 	return c.fetch(u, method, depth, requestData, ctx, hdr, req)
-}
-
-func setRequestBody(req *http.Request, body io.Reader) {
-	if body != nil {
-		switch v := body.(type) {
-		case *bytes.Buffer:
-			req.ContentLength = int64(v.Len())
-			buf := v.Bytes()
-			req.GetBody = func() (io.ReadCloser, error) {
-				r := bytes.NewReader(buf)
-				return ioutil.NopCloser(r), nil
-			}
-		case *bytes.Reader:
-			req.ContentLength = int64(v.Len())
-			snapshot := *v
-			req.GetBody = func() (io.ReadCloser, error) {
-				r := snapshot
-				return ioutil.NopCloser(&r), nil
-			}
-		case *strings.Reader:
-			req.ContentLength = int64(v.Len())
-			snapshot := *v
-			req.GetBody = func() (io.ReadCloser, error) {
-				r := snapshot
-				return ioutil.NopCloser(&r), nil
-			}
-		}
-		if req.GetBody != nil && req.ContentLength == 0 {
-			req.Body = http.NoBody
-			req.GetBody = func() (io.ReadCloser, error) { return http.NoBody, nil }
-		}
-	}
 }
 
 func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, req *http.Request) error {
@@ -737,10 +712,8 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 	return err
 }
 
-func (c *Collector) requestCheck(u string, parsedURL *url.URL, method string, requestData io.Reader, depth int, checkRevisit bool) error {
-	if u == "" {
-		return ErrMissingURL
-	}
+func (c *Collector) requestCheck(parsedURL *url.URL, method string, getBody func() (io.ReadCloser, error), depth int, checkRevisit bool) error {
+	u := parsedURL.String()
 	if c.MaxDepth > 0 && c.MaxDepth < depth {
 		return ErrMaxDepth
 	}
@@ -753,25 +726,29 @@ func (c *Collector) requestCheck(u string, parsedURL *url.URL, method string, re
 		}
 	}
 	if checkRevisit && !c.AllowURLRevisit {
-		h := fnv.New64a()
-		h.Write([]byte(u))
-
-		var uHash uint64
-		if method == "GET" {
-			uHash = h.Sum64()
-		} else if requestData != nil {
-			h.Write(streamToByte(requestData))
-			uHash = h.Sum64()
-		} else {
+		// TODO weird behaviour, it allows CheckHead to work correctly,
+		// but it should probably better be solved with
+		// "check-but-not-save" flag or something
+		if method != "GET" && getBody == nil {
 			return nil
 		}
 
+		var body io.ReadCloser
+		if getBody != nil {
+			var err error
+			body, err = getBody()
+			if err != nil {
+				return err
+			}
+			defer body.Close()
+		}
+		uHash := requestHash(u, body)
 		visited, err := c.store.IsVisited(uHash)
 		if err != nil {
 			return err
 		}
 		if visited {
-			return ErrAlreadyVisited
+			return &AlreadyVisitedError{parsedURL}
 		}
 		return c.store.Visited(uHash)
 	}
@@ -1115,7 +1092,7 @@ func (c *Collector) handleOnHTML(resp *Response) error {
 		return err
 	}
 	if href, found := doc.Find("base[href]").Attr("href"); found {
-		u, err := whatwgUrl.ParseRef(resp.Request.URL.String(), href)
+		u, err := urlParser.ParseRef(resp.Request.URL.String(), href)
 		if err == nil {
 			baseURL, err := url.Parse(u.Href(false))
 			if err == nil {
@@ -1331,6 +1308,31 @@ func (c *Collector) checkRedirectFunc() func(req *http.Request, via []*http.Requ
 		if err := c.checkFilters(req.URL.String(), req.URL.Hostname()); err != nil {
 			return fmt.Errorf("Not following redirect to %q: %w", req.URL, err)
 		}
+
+		if !c.AllowURLRevisit {
+			var body io.ReadCloser
+			if req.GetBody != nil {
+				var err error
+				body, err = req.GetBody()
+				if err != nil {
+					return err
+				}
+				defer body.Close()
+			}
+			uHash := requestHash(req.URL.String(), body)
+			visited, err := c.store.IsVisited(uHash)
+			if err != nil {
+				return err
+			}
+			if visited {
+				return &AlreadyVisitedError{req.URL}
+			}
+			err = c.store.Visited(uHash)
+			if err != nil {
+				return err
+			}
+		}
+
 		if c.redirectHandler != nil {
 			return c.redirectHandler(req, via)
 		}
@@ -1366,14 +1368,8 @@ func (c *Collector) parseSettingsFromEnv() {
 }
 
 func (c *Collector) checkHasVisited(URL string, requestData map[string]string) (bool, error) {
-	h := fnv.New64a()
-	h.Write([]byte(URL))
-
-	if requestData != nil {
-		h.Write(streamToByte(createFormReader(requestData)))
-	}
-
-	return c.store.IsVisited(h.Sum64())
+	hash := requestHash(URL, createFormReader(requestData))
+	return c.store.IsVisited(hash)
 }
 
 // SanitizeFileName replaces dangerous characters in a string
@@ -1485,15 +1481,18 @@ func isMatchingFilter(fs []*regexp.Regexp, d []byte) bool {
 	return false
 }
 
-func streamToByte(r io.Reader) []byte {
-	buf := new(bytes.Buffer)
-	buf.ReadFrom(r)
-
-	if strReader, k := r.(*strings.Reader); k {
-		strReader.Seek(0, 0)
-	} else if bReader, kb := r.(*bytes.Reader); kb {
-		bReader.Seek(0, 0)
+func requestHash(url string, body io.Reader) uint64 {
+	h := fnv.New64a()
+	// reparse the url to fix ambiguities such as
+	// "http://example.com" vs "http://example.com/"
+	parsedWhatwgURL, err := whatwgUrl.Parse(url)
+	if err == nil {
+		h.Write([]byte(parsedWhatwgURL.String()))
+	} else {
+		h.Write([]byte(url))
 	}
-
-	return buf.Bytes()
+	if body != nil {
+		io.Copy(h, body)
+	}
+	return h.Sum64()
 }
