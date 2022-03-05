@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/cookiejar"
@@ -55,6 +56,8 @@ type CollectorOption func(*Collector)
 type Collector struct {
 	// UserAgent is the User-Agent string used by HTTP requests
 	UserAgent string
+	// Custom headers for the request
+	Headers *http.Header
 	// MaxDepth limits the recursion depth of visited URLs.
 	// Set it to 0 for infinite recursion (default).
 	MaxDepth int
@@ -280,6 +283,17 @@ func UserAgent(ua string) CollectorOption {
 	}
 }
 
+// Header sets the custom headers used by the Collector.
+func Headers(headers map[string]string) CollectorOption {
+	return func(c *Collector) {
+		custom_headers := make(http.Header)
+		for header, value := range headers {
+			custom_headers.Add(header, value)
+		}
+		c.Headers = &custom_headers
+	}
+}
+
 // MaxDepth limits the recursion depth of visited URLs.
 func MaxDepth(depth int) CollectorOption {
 	return func(c *Collector) {
@@ -414,6 +428,7 @@ func CheckHead() CollectorOption {
 // configuration for the Collector
 func (c *Collector) Init() {
 	c.UserAgent = "colly - https://github.com/gocolly/colly/v2"
+	c.Headers = nil
 	c.MaxDepth = 0
 	c.store = &storage.InMemoryStorage{}
 	c.store.Init()
@@ -561,28 +576,47 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 	if err != nil {
 		return err
 	}
+	if err := c.requestCheck(u, parsedURL, method, requestData, depth, checkRevisit); err != nil {
+		return err
+	}
+
 	if hdr == nil {
 		hdr = http.Header{}
+		if c.Headers != nil {
+			for k, v := range *c.Headers {
+				for _, value := range v {
+					hdr.Add(k, value)
+				}
+			}
+		}
 	}
 	if _, ok := hdr["User-Agent"]; !ok {
 		hdr.Set("User-Agent", c.UserAgent)
 	}
-	req, err := http.NewRequest(method, parsedURL.String(), requestData)
-	if err != nil {
-		return err
+	rc, ok := requestData.(io.ReadCloser)
+	if !ok && requestData != nil {
+		rc = ioutil.NopCloser(requestData)
 	}
-	req.Header = hdr
 	// The Go HTTP API ignores "Host" in the headers, preferring the client
 	// to use the Host field on Request.
+	host := parsedURL.Host
 	if hostHeader := hdr.Get("Host"); hostHeader != "" {
-		req.Host = hostHeader
+		host = hostHeader
+	}
+	req := &http.Request{
+		Method:     method,
+		URL:        parsedURL,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     hdr,
+		Body:       rc,
+		Host:       host,
 	}
 	// note: once 1.13 is minimum supported Go version,
 	// replace this with http.NewRequestWithContext
 	req = req.WithContext(c.Context)
-	if err := c.requestCheck(u, parsedURL, method, req.GetBody, depth, checkRevisit); err != nil {
-		return err
-	}
+	setRequestBody(req, requestData)
 	u = parsedURL.String()
 	c.wg.Add(1)
 	if c.Async {
@@ -590,6 +624,38 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 		return nil
 	}
 	return c.fetch(u, method, depth, requestData, ctx, hdr, req)
+}
+
+func setRequestBody(req *http.Request, body io.Reader) {
+	if body != nil {
+		switch v := body.(type) {
+		case *bytes.Buffer:
+			req.ContentLength = int64(v.Len())
+			buf := v.Bytes()
+			req.GetBody = func() (io.ReadCloser, error) {
+				r := bytes.NewReader(buf)
+				return ioutil.NopCloser(r), nil
+			}
+		case *bytes.Reader:
+			req.ContentLength = int64(v.Len())
+			snapshot := *v
+			req.GetBody = func() (io.ReadCloser, error) {
+				r := snapshot
+				return ioutil.NopCloser(&r), nil
+			}
+		case *strings.Reader:
+			req.ContentLength = int64(v.Len())
+			snapshot := *v
+			req.GetBody = func() (io.ReadCloser, error) {
+				r := snapshot
+				return ioutil.NopCloser(&r), nil
+			}
+		}
+		if req.GetBody != nil && req.ContentLength == 0 {
+			req.Body = http.NoBody
+			req.GetBody = func() (io.ReadCloser, error) { return http.NoBody, nil }
+		}
+	}
 }
 
 func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, req *http.Request) error {
@@ -600,6 +666,7 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 	request := &Request{
 		URL:       req.URL,
 		Headers:   &req.Header,
+		Host:      req.Host,
 		Ctx:       ctx,
 		Depth:     depth,
 		Method:    method,
@@ -670,7 +737,7 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 	return err
 }
 
-func (c *Collector) requestCheck(u string, parsedURL *url.URL, method string, getBody func() (io.ReadCloser, error), depth int, checkRevisit bool) error {
+func (c *Collector) requestCheck(u string, parsedURL *url.URL, method string, requestData io.Reader, depth int, checkRevisit bool) error {
 	if u == "" {
 		return ErrMissingURL
 	}
@@ -686,23 +753,19 @@ func (c *Collector) requestCheck(u string, parsedURL *url.URL, method string, ge
 		}
 	}
 	if checkRevisit && !c.AllowURLRevisit {
-		// TODO weird behaviour, it allows CheckHead to work correctly,
-		// but it should probably better be solved with
-		// "check-but-not-save" flag or something
-		if method != "GET" && getBody == nil {
+		h := fnv.New64a()
+		h.Write([]byte(u))
+
+		var uHash uint64
+		if method == "GET" {
+			uHash = h.Sum64()
+		} else if requestData != nil {
+			h.Write(streamToByte(requestData))
+			uHash = h.Sum64()
+		} else {
 			return nil
 		}
 
-		var body io.ReadCloser
-		if getBody != nil {
-			var err error
-			body, err = getBody()
-			if err != nil {
-				return err
-			}
-			defer body.Close()
-		}
-		uHash := requestHash(u, body)
 		visited, err := c.store.IsVisited(uHash)
 		if err != nil {
 			return err
@@ -1243,6 +1306,7 @@ func (c *Collector) Clone() *Collector {
 		CheckHead:              c.CheckHead,
 		ParseHTTPErrorResponse: c.ParseHTTPErrorResponse,
 		UserAgent:              c.UserAgent,
+		Headers:                c.Headers,
 		TraceHTTP:              c.TraceHTTP,
 		Context:                c.Context,
 		store:                  c.store,
@@ -1302,8 +1366,14 @@ func (c *Collector) parseSettingsFromEnv() {
 }
 
 func (c *Collector) checkHasVisited(URL string, requestData map[string]string) (bool, error) {
-	hash := requestHash(URL, createFormReader(requestData))
-	return c.store.IsVisited(hash)
+	h := fnv.New64a()
+	h.Write([]byte(URL))
+
+	if requestData != nil {
+		h.Write(streamToByte(createFormReader(requestData)))
+	}
+
+	return c.store.IsVisited(h.Sum64())
 }
 
 // SanitizeFileName replaces dangerous characters in a string
@@ -1415,11 +1485,15 @@ func isMatchingFilter(fs []*regexp.Regexp, d []byte) bool {
 	return false
 }
 
-func requestHash(url string, body io.Reader) uint64 {
-	h := fnv.New64a()
-	h.Write([]byte(url))
-	if body != nil {
-		io.Copy(h, body)
+func streamToByte(r io.Reader) []byte {
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(r)
+
+	if strReader, k := r.(*strings.Reader); k {
+		strReader.Seek(0, 0)
+	} else if bReader, kb := r.(*bytes.Reader); kb {
+		bReader.Seek(0, 0)
 	}
-	return h.Sum64()
+
+	return buf.Bytes()
 }
