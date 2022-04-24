@@ -157,26 +157,6 @@ type ScrapedCallback func(*Response)
 // ProxyFunc is a type alias for proxy setter functions.
 type ProxyFunc func(*http.Request) (*url.URL, error)
 
-// AlreadyVisitedError is the error type for already visited URLs.
-//
-// It's returned synchronously by Visit when the URL passed to Visit
-// is already visited.
-//
-// When already visited URL is encountered after following
-// redirects, this error appears in OnError callback, and if Async
-// mode is not enabled, is also returned by Visit.
-type AlreadyVisitedError struct {
-	// Destination is the URL that was attempted to be visited.
-	// It might not match the URL passed to Visit if redirect
-	// was followed.
-	Destination *url.URL
-}
-
-// Error implements error interface.
-func (e *AlreadyVisitedError) Error() string {
-	return fmt.Sprintf("%q already visited", e.Destination)
-}
-
 type htmlCallbackContainer struct {
 	Selector string
 	Function HTMLCallback
@@ -216,6 +196,8 @@ var (
 	// ErrNoURLFiltersMatch is the error thrown if visiting
 	// a URL which is not allowed by URLFilters
 	ErrNoURLFiltersMatch = errors.New("No URLFilters match")
+	// ErrAlreadyVisited is the error type for already visited URLs
+	ErrAlreadyVisited = errors.New("URL already visited")
 	// ErrRobotsTxtBlocked is the error type for robots.txt errors
 	ErrRobotsTxtBlocked = errors.New("URL blocked by robots.txt")
 	// ErrNoCookieJar is the error type for missing cookie jar
@@ -621,7 +603,7 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 	// note: once 1.13 is minimum supported Go version,
 	// replace this with http.NewRequestWithContext
 	req = req.WithContext(c.Context)
-	if err := c.requestCheck(parsedURL, method, req.GetBody, depth, checkRevisit); err != nil {
+	if err := c.requestCheck(u, parsedURL, method, req.GetBody, depth, checkRevisit); err != nil {
 		return err
 	}
 	u = parsedURL.String()
@@ -712,8 +694,10 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 	return err
 }
 
-func (c *Collector) requestCheck(parsedURL *url.URL, method string, getBody func() (io.ReadCloser, error), depth int, checkRevisit bool) error {
-	u := parsedURL.String()
+func (c *Collector) requestCheck(u string, parsedURL *url.URL, method string, getBody func() (io.ReadCloser, error), depth int, checkRevisit bool) error {
+	if u == "" {
+		return ErrMissingURL
+	}
 	if c.MaxDepth > 0 && c.MaxDepth < depth {
 		return ErrMaxDepth
 	}
@@ -748,7 +732,7 @@ func (c *Collector) requestCheck(parsedURL *url.URL, method string, getBody func
 			return err
 		}
 		if visited {
-			return &AlreadyVisitedError{parsedURL}
+			return ErrAlreadyVisited
 		}
 		return c.store.Visited(uHash)
 	}
@@ -1308,31 +1292,6 @@ func (c *Collector) checkRedirectFunc() func(req *http.Request, via []*http.Requ
 		if err := c.checkFilters(req.URL.String(), req.URL.Hostname()); err != nil {
 			return fmt.Errorf("Not following redirect to %q: %w", req.URL, err)
 		}
-
-		if !c.AllowURLRevisit {
-			var body io.ReadCloser
-			if req.GetBody != nil {
-				var err error
-				body, err = req.GetBody()
-				if err != nil {
-					return err
-				}
-				defer body.Close()
-			}
-			uHash := requestHash(req.URL.String(), body)
-			visited, err := c.store.IsVisited(uHash)
-			if err != nil {
-				return err
-			}
-			if visited {
-				return &AlreadyVisitedError{req.URL}
-			}
-			err = c.store.Visited(uHash)
-			if err != nil {
-				return err
-			}
-		}
-
 		if c.redirectHandler != nil {
 			return c.redirectHandler(req, via)
 		}
@@ -1483,14 +1442,7 @@ func isMatchingFilter(fs []*regexp.Regexp, d []byte) bool {
 
 func requestHash(url string, body io.Reader) uint64 {
 	h := fnv.New64a()
-	// reparse the url to fix ambiguities such as
-	// "http://example.com" vs "http://example.com/"
-	parsedWhatwgURL, err := whatwgUrl.Parse(url)
-	if err == nil {
-		h.Write([]byte(parsedWhatwgURL.String()))
-	} else {
-		h.Write([]byte(url))
-	}
+	h.Write([]byte(url))
 	if body != nil {
 		io.Copy(h, body)
 	}
